@@ -1,0 +1,77 @@
+Import chatkit
+
+Class DemoChatWindow Inherits Window Implements ChatPanelHost
+    Public Property Chat As ChatPanel = New ChatPanel()
+    Public Sub Constructor()
+        Super.Constructor()
+        Me.Title = "ChatKit · Native agent panel"
+        Me.Move(100, 80, 560, 800)
+        Me.Chat.Move(20, 20, 520, 760)
+        Me.Chat.LayoutPanel(520, 760)
+        Me.Chat.AttachHost(Me)
+        Dim providers As Array Of ChatProvider = [New ChatProvider("demo", "Demo agent · local", True), New ChatProvider("acp", "ACP agent", False, "Supply a host implementation and configured agent endpoint")]
+        Me.Chat.SetProviders(providers)
+        Dim context As Array Of ChatContext = [New ChatContext("main", "main.bui", 1)]
+        Me.Chat.SetContext(context)
+        Me.Chat.AppendMessage("Studio", "This reusable panel routes prompts, context IDs, tool activity, permissions and project proposals to your host.")
+        Me.AddSubview(Me.Chat)
+    End Sub
+    Public Sub SendMessage(providerId As String, prompt As String, contextIds As Array Of String)
+        Me.Chat.AppendMessage("You", prompt)
+        Me.Chat.AppendToolActivity("read", "Inspect attached project item", "complete")
+        Me.Chat.AppendMessage("Demo agent", "The host received " + String.From(Array.Count(contextIds)) + " item references. No real model request was made.")
+        Me.Chat.ShowProposal("example", "main.bui\n- Print \"Hello\"\n+ Print \"Hello, Buoy\"")
+    End Sub
+    Public Sub CancelTurn()
+        Me.Chat.SetBusy(False)
+    End Sub
+    Public Sub ApproveProposal(proposalId As String)
+        Me.Chat.AppendMessage("Studio", "The demo host received Apply for " + proposalId + ".")
+        Me.Chat.ClearProposal()
+    End Sub
+    Public Sub RejectProposal(proposalId As String)
+        Me.Chat.AppendMessage("Studio", "The demo host received Reject for " + proposalId + ".")
+        Me.Chat.ClearProposal()
+    End Sub
+    Public Sub ProviderChanged(providerId As String)
+    End Sub
+    Public Sub ResolvePermission(allow As Boolean)
+        Me.Chat.ClearProposal()
+    End Sub
+    Public Sub SignInWithChatGPT()
+        Me.Chat.AppendMessage("Studio", "Connect the host callback to your ChatGPTAuth flow.")
+    End Sub
+    Handle Closed()
+        Me.Chat.DetachHost()
+        Application.Quit()
+    End Handle
+End Class
+
+Class DemoExitTimer Inherits Timer
+    Public Property Owner As DemoChatWindow
+    Public Overrides Sub NotifyTick()
+        Me.Stop()
+        Me.Owner.Chat.ComposerText = "Explain the attached source"
+        Me.Owner.Chat.PerformSend()
+        Me.Owner.Chat.PerformReject()
+        Print "chatkit demo self-test passed"
+        Me.Owner.Chat.DetachHost()
+        Application.Quit()
+    End Sub
+End Class
+
+Sub Main(args As Array Of String)
+    Dim window As New DemoChatWindow()
+    window.Show()
+    Dim timer As DemoExitTimer = Nil
+    If Array.Count(args) > 1 Then
+        If args(1) = "--self-test" Then
+            timer = New DemoExitTimer()
+            timer.Owner = window
+            timer.Period = 100
+            timer.Count = 1
+            timer.Start()
+        End If
+    End If
+    Application.Run()
+End Sub

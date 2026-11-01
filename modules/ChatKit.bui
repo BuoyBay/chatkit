@@ -1,0 +1,2266 @@
+''' An application-supplied provider descriptor; unavailable providers remain visible but cannot send.
+Public Class ChatProvider
+    Private Property mId As String
+    Private Property mTitle As String
+    Private Property mAvailable As Boolean
+    Private Property mDetail As String
+
+    Public Sub Constructor(providerId As String, title As String, available As Boolean, detail As String = "")
+        If providerId = "" Or title = "" Then Throw New InvalidArgumentException("Provider ID and title are required")
+        Me.mId = providerId
+        Me.mTitle = title
+        Me.mAvailable = available
+        Me.mDetail = detail
+    End Sub
+
+    Public Property Id As String
+        Get
+            Return Me.mId
+        End Get
+    End Property
+    Public Property Title As String
+        Get
+            Return Me.mTitle
+        End Get
+    End Property
+    Public Property Available As Boolean
+        Get
+            Return Me.mAvailable
+        End Get
+    End Property
+    Public Property Detail As String
+        Get
+            Return Me.mDetail
+        End Get
+    End Property
+End Class
+
+''' A project-item reference, not a copied file on disk. The host resolves its current revision.
+Public Class ChatContext
+    Private Property mId As String
+    Private Property mTitle As String
+    Private Property mVersion As Integer
+
+    Public Sub Constructor(itemId As String, title As String, version As Integer)
+        If itemId = "" Then Throw New InvalidArgumentException("Context item ID is required")
+        Me.mId = itemId
+        Me.mTitle = title
+        Me.mVersion = version
+    End Sub
+    Public Property ItemId As String
+        Get
+            Return Me.mId
+        End Get
+    End Property
+    Public Property Title As String
+        Get
+            Return Me.mTitle
+        End Get
+    End Property
+    Public Property Version As Integer
+        Get
+            Return Me.mVersion
+        End Get
+    End Property
+End Class
+
+''' A user-chosen file (image or document) attached to the next prompt.
+''' Images up to ImagePreviewLimit bytes carry an inline data URL for the transcript thumbnail.
+Public Class ChatAttachment
+    Public Const ImagePreviewLimit As Integer = 6291456
+    Private Property mPath As String
+    Private Property mName As String
+    Private Property mKind As String
+    Private Property mMimeType As String
+    Private Property mSize As Integer
+    Private Property mDataUrl As String
+
+    Public Sub Constructor(filePath As String, name As String, kind As String, mimeType As String, size As Integer, dataUrl As String = "")
+        If filePath = "" Then Throw New InvalidArgumentException("Attachment path is required")
+        If kind <> "image" And kind <> "file" Then Throw New InvalidArgumentException("Attachment kind must be image or file")
+        Me.mPath = filePath
+        Me.mName = name
+        If Me.mName = "" Then Me.mName = filePath
+        Me.mKind = kind
+        Me.mMimeType = mimeType
+        Me.mSize = size
+        Me.mDataUrl = dataUrl
+    End Sub
+
+    ''' Reads metadata (and a thumbnail for small images) from an existing file.
+    Public Shared Function FromFile(item As FileSystemItem) As ChatAttachment
+        If item = Nil Then Throw New InvalidArgumentException("Attachment file is required")
+        If Not item.IsFile() Then Throw New InvalidArgumentException("Only files can be attached: " + item.Name())
+        Dim mime As String = ChatMimeType(item.Ext())
+        Dim size As Integer = item.Length()
+        Dim kind As String = "file"
+        Dim dataUrl As String = ""
+        If String.StartsWith(mime, "image/", True) Then
+            kind = "image"
+            If size > 0 And size <= ChatAttachment.ImagePreviewLimit Then
+                Dim opened As Result Of BinaryStream, IOError = BinaryStream.Open(item, False)
+                If opened.IsOk Then
+                    Dim stream As BinaryStream = opened.Value
+                    Try
+                        Dim data As Bytes = stream.Read(stream.Length)
+                        dataUrl = "data:" + mime + ";base64," + data.ToBase64()
+                    Finally
+                        stream.Close()
+                    End Try
+                End If
+            End If
+        End If
+        Return New ChatAttachment(item.FullPath(), item.Name(), kind, mime, size, dataUrl)
+    End Function
+
+    Public Property Path As String
+        Get
+            Return Me.mPath
+        End Get
+    End Property
+    Public Property Name As String
+        Get
+            Return Me.mName
+        End Get
+    End Property
+    ''' "image" or "file".
+    Public Property Kind As String
+        Get
+            Return Me.mKind
+        End Get
+    End Property
+    Public Property MimeType As String
+        Get
+            Return Me.mMimeType
+        End Get
+    End Property
+    Public Property Size As Integer
+        Get
+            Return Me.mSize
+        End Get
+    End Property
+    Public Property DataUrl As String
+        Get
+            Return Me.mDataUrl
+        End Get
+    End Property
+
+    Internal Function ToJSON() As JSONItem
+        Dim value As JSONItem = JSONItem.NewObject()
+        value.Value("name") = Me.mName
+        value.Value("kind") = Me.mKind
+        value.Value("path") = Me.mPath
+        If Me.mDataUrl <> "" Then value.Value("dataUrl") = Me.mDataUrl
+        value.Value("detail") = ChatByteSize(Me.mSize)
+        Return value
+    End Function
+End Class
+
+''' One file inside a proposal card; DiffText is a unified diff the host computed.
+Public Class ChatFileChange
+    Private Property mPath As String
+    Private Property mRevision As Integer
+    Private Property mDiff As String
+    Private Property mAdded As Integer
+    Private Property mRemoved As Integer
+
+    Public Sub Constructor(filePath As String, revision As Integer, diffText As String)
+        If filePath = "" Then Throw New InvalidArgumentException("Changed file path is required")
+        Me.mPath = filePath
+        Me.mRevision = revision
+        Me.mDiff = diffText
+        For Each line As String In String.Split(diffText, "\n")
+            If String.StartsWith(line, "+++", True) Or String.StartsWith(line, "---", True) Then Continue For
+            If String.StartsWith(line, "+", True) Then Me.mAdded += 1
+            If String.StartsWith(line, "-", True) Then Me.mRemoved += 1
+        Next
+    End Sub
+    Public Property Path As String
+        Get
+            Return Me.mPath
+        End Get
+    End Property
+    Public Property Revision As Integer
+        Get
+            Return Me.mRevision
+        End Get
+    End Property
+    Public Property DiffText As String
+        Get
+            Return Me.mDiff
+        End Get
+    End Property
+    Public Property Added As Integer
+        Get
+            Return Me.mAdded
+        End Get
+    End Property
+    Public Property Removed As Integer
+        Get
+            Return Me.mRemoved
+        End Get
+    End Property
+End Class
+
+Public Interface ChatPanelHost
+    Sub SendMessage(providerId As String, prompt As String, contextIds As Array Of String)
+    Sub CancelTurn()
+    Sub ApproveProposal(proposalId As String)
+    Sub RejectProposal(proposalId As String)
+    Sub ProviderChanged(providerId As String)
+    Sub ResolvePermission(allow As Boolean)
+    Sub SignInWithChatGPT()
+End Interface
+
+''' Optional host capabilities. When the host implements this interface the account
+''' button toggles between sign-in and sign-out, and transcript links/files open in the host.
+Public Interface ChatPanelAccountHost
+    Sub SignOutOfChatGPT()
+    Sub OpenChatFile(filePath As String)
+    Sub OpenChatLink(url As String)
+End Interface
+
+''' Optional host capability: notified when the user switches between the web and
+''' native transcripts from the panel, so the host can persist the choice.
+Public Interface ChatPanelViewHost
+    Sub TranscriptModeChanged(plainTranscript As Boolean)
+End Interface
+
+Public Function ChatMimeType(fileExt As String) As String
+    Select Case String.LCase(fileExt)
+        Case "png"
+            Return "image/png"
+        Case "jpg", "jpeg"
+            Return "image/jpeg"
+        Case "gif"
+            Return "image/gif"
+        Case "webp"
+            Return "image/webp"
+        Case "bmp"
+            Return "image/bmp"
+        Case "svg"
+            Return "image/svg+xml"
+        Case "pdf"
+            Return "application/pdf"
+        Case "json"
+            Return "application/json"
+        Case "md", "markdown"
+            Return "text/markdown"
+        Case "bui", "txt", "log", "csv", "c", "h", "py", "js", "ts", "html", "css", "xml", "yml", "yaml", "toml", "sh"
+            Return "text/plain"
+    End Select
+    Return "application/octet-stream"
+End Function
+
+Public Function ChatByteSize(size As Integer) As String
+    If size < 0 Then Return ""
+    If size < 1024 Then Return String.From(size) + " B"
+    If size < 1048576 Then Return String.From((size + 512) \ 1024) + " KB"
+    Dim tenths As Integer = (size * 10 + 524288) \ 1048576
+    Return String.From(tenths \ 10) + "." + String.From(tenths Mod 10) + " MB"
+End Function
+
+Private Class ChatActionButton Inherits Button
+    Public Property Owner As Weak ChatPanel
+    Public Property ActionName As String
+    Private Property mProgrammatic As Boolean = False
+    Private Property mActionError As Exception = Nil
+    Public Sub InvokeAction()
+        If Me.mProgrammatic Then Return
+        Me.mProgrammatic = True
+        Me.mActionError = Nil
+        Try
+            If Me.Visible Then
+                Me.PerformClick()
+            Else
+                ' Inline (rich transcript) cards replace hidden native buttons; act directly.
+                Dim target As ChatPanel = Me.Owner
+                If target <> Nil Then target.Activate(Me.ActionName)
+            End If
+        Catch e As Exception
+            Me.mActionError = e
+        Finally
+            Me.mProgrammatic = False
+        End Try
+        Dim actionError As Exception = Me.mActionError
+        Me.mActionError = Nil
+        If actionError <> Nil Then Throw actionError
+    End Sub
+    Handle Action()
+        Dim target As ChatPanel = Me.Owner
+        If target = Nil Then Return
+        If Me.mProgrammatic Then
+            Try
+                target.Activate(Me.ActionName)
+            Catch e As Exception
+                Me.mActionError = e
+            End Try
+        Else
+            Try
+                target.Activate(Me.ActionName)
+            Catch e As Exception
+                ' Never let status-reporting failures unwind the native callback.
+                Try
+                    target.SetStatus("Action failed: " + e.Message)
+                Catch reportError As Exception
+                End Try
+            End Try
+        End If
+    End Handle
+End Class
+
+Private Class ChatProviderPicker Inherits ComboBox
+    Public Property Owner As Weak ChatPanel
+    Handle SelectionChanged()
+        Dim target As ChatPanel = Me.Owner
+        If target <> Nil Then target.NotifyProviderChanged()
+    End Handle
+End Class
+
+''' The rich transcript surface. Only the in-memory document may load.
+Private Class ChatTranscriptView Inherits HTMLView
+    Public Property Owner As Weak ChatPanel
+    Handle JavaScriptRequest()
+        ' An exception escaping an event handler would terminate the app.
+        Try
+            Dim message As String = Me.Message
+            Dim target As ChatPanel = Me.Owner
+            If target <> Nil Then
+                Try
+                    target.AcceptPageMessage(message)
+                Catch actionError As Exception
+                    target.SetStatus("Action failed: " + actionError.Message)
+                End Try
+            End If
+        Catch e As Exception
+        End Try
+    End Handle
+    Handle CancelLoad(url As String) As Boolean
+        Return Not (String.Left(url, 6) = "about:" Or String.Left(url, 5) = "data:")
+    End Handle
+End Class
+
+''' Detects a transcript engine that never starts (missing WebKitGTK, GPU-less host).
+Private Class ChatPanelTicker Inherits Timer
+    Public Property Owner As Weak ChatPanel
+    Public Overrides Sub NotifyTick()
+        Dim target As ChatPanel = Me.Owner
+        If target <> Nil Then target.Tick()
+    End Sub
+End Class
+
+''' Delivers queued transcript scripts on the next main-loop turn, one call per batch.
+Private Class ChatScriptFlusher Inherits Timer
+    Public Property Owner As Weak ChatPanel
+    Public Overrides Sub NotifyTick()
+        Me.Stop()
+        Dim target As ChatPanel = Me.Owner
+        If target <> Nil Then target.FlushScripts()
+    End Sub
+End Class
+
+#If TargetLinux Then
+    Private Declare Function ChatKitSetEnv Lib "c" Alias "setenv" (name As String, value As String, overwrite As Int32) As Int32
+#End If
+
+Private Class ChatDropTarget Implements IDropTarget
+    Public Property Owner As Weak ChatPanel
+    Public Overrides Function DragEntered(payload As DragItem, requested As DragAction) As DragAction
+        If payload.HasType(DragType.FileList) Then Return DragAction.Copy
+        Return DragAction.None
+    End Function
+    Public Overrides Function DragOver(payload As DragItem, requested As DragAction, pt As Point) As DragAction
+        If payload.HasType(DragType.FileList) Then Return DragAction.Copy
+        Return DragAction.None
+    End Function
+    Public Overrides Sub DragLeft()
+    End Sub
+    Public Overrides Function DragDropped(payload As DragItem, action As DragAction, pt As Point) As Boolean
+        Dim target As ChatPanel = Me.Owner
+        If target = Nil Or Not payload.HasType(DragType.FileList) Then Return False
+        If target.IsBusy Then
+            target.SetStatus("Attach files after the current turn")
+            Return False
+        End If
+        Try
+            For Each item As FileSystemItem In payload.AsFiles()
+                target.AttachFile(item)
+            Next
+        Catch e As Exception
+            target.SetStatus("Attachment failed: " + e.Message)
+        End Try
+        Return True
+    End Function
+End Class
+
+''' A native, main-thread-only panel. The host owns transport, project edits and authentication.
+''' The transcript renders in an embedded HTMLView (markdown, inline tool calls, diff and
+''' approval cards, attachments, turn stats) and falls back to plain native text when no web
+''' engine is available. Set BUOY_CHATKIT_PLAIN=1 to force the plain transcript.
+Public Class ChatPanel Inherits View
+    Public Const RichTimeoutMicroseconds As Integer = 6000000
+    Private Property mHost As ChatPanelHost
+    Private Property mProviders As Array Of ChatProvider = []
+    Private Property mContext As Array Of ChatContext = []
+    Private Property mBusy As Boolean = False
+    Private Property mSending As Boolean = False
+    Private Property mAuthenticated As Boolean = False
+    Private Property mAuthBusy As Boolean = False
+    Private Property mPermission As Boolean = False
+    Private Property mPermissionCanAccept As Boolean = True
+    Private Property mProposalId As String
+    Private Property mCardId As String
+    Private Property mCardCounter As Integer = 0
+    Private Property mTranscript As String
+    Private Property mTools As Map Of String, String = New Map Of String, String()
+    Private Property mToolOrder As Array Of String = []
+    Private Property mProvider As ChatProviderPicker = New ChatProviderPicker()
+    Private Property mModel As ComboBox = New ComboBox()
+    Private Property mModelIds As Array Of String = []
+    Private Property mHeading As Label = New Label()
+    Private Property mContextLabel As Label = New Label()
+    Private Property mTranscriptArea As TextArea = New TextArea()
+    ' Created on first web use so the plain transcript never loads a web engine.
+    Private Property mTranscriptView As ChatTranscriptView
+    Private Property mActivity As TextArea = New TextArea()
+    Private Property mProposal As TextArea = New TextArea()
+    Private Property mComposer As TextArea = New TextArea()
+    Private Property mAttachmentsLabel As Label = New Label()
+    Private Property mAuth As ChatActionButton = New ChatActionButton()
+    Private Property mAttach As ChatActionButton = New ChatActionButton()
+    Private Property mClearAttachments As ChatActionButton = New ChatActionButton()
+    Private Property mSend As ChatActionButton = New ChatActionButton()
+    Private Property mCancel As ChatActionButton = New ChatActionButton()
+    Private Property mApprove As ChatActionButton = New ChatActionButton()
+    Private Property mReject As ChatActionButton = New ChatActionButton()
+    Private Property mCopyAll As ChatActionButton = New ChatActionButton()
+    Private Property mViewMode As ChatActionButton = New ChatActionButton()
+    ' Last focus state the web page reported (window focus/blur inside the page).
+    Private Property mPageFocused As Boolean = False
+    ' When the page last lost focus. Opening a GTK/Win32 menu can blur the page just
+    ' before the menu command runs, so a recent blur still counts as transcript focus.
+    Private Property mPageBlurAt As Integer = 0
+    Private Const BlurGraceMicroseconds As Integer = 1500000
+    Private Property mStatus As Label = New Label()
+    Private Property mWidth As Integer = 500
+    Private Property mHeight As Integer = 720
+    ' Rich transcript state: 0 loading, 1 ready, 2 plain fallback.
+    Private Property mRichState As Integer = 0
+    Private Property mLoadStarted As Integer = 0
+    Private Property mTicker As ChatPanelTicker = New ChatPanelTicker()
+    Private Property mDropTarget As ChatDropTarget = New ChatDropTarget()
+    Private Property mDark As Integer = -1
+    Private Property mPendingScript As String = ""
+    Private Property mFlushScheduled As Boolean = False
+    Private Property mFlusher As ChatScriptFlusher = New ChatScriptFlusher()
+    ' Replayable model of the transcript: ordered operations, coalesced by key.
+    Private Property mOps As Array Of JSONItem = []
+    Private Property mOpIndex As Map Of String, Integer = New Map Of String, Integer()
+    Private Property mMessageCounter As Integer = 0
+    ' The open assistant reply segment ("" when closed), the last segment shown (turn
+    ' stats live there), its author, and whether the next segment continues the reply.
+    Private Property mAssistantId As String
+    Private Property mLastAssistantId As String
+    Private Property mStatsId As String
+    Private Property mAssistantAuthor As String
+    Private Property mAssistantContinues As Boolean = False
+    Private Property mEmptyState As JSONItem
+    ' Attachments queued for the next prompt, and those being sent right now.
+    Private Property mAttachments As Array Of ChatAttachment = []
+    Private Property mSendingAttachments As Array Of ChatAttachment = []
+    ' Per-turn stream statistics (estimated unless the host supplies usage).
+    Private Property mStreamStart As Integer = 0
+    Private Property mStreamChars As Integer = 0
+    Private Property mStatsSent As Integer = 0
+    Private Property mUsageIn As Integer = 0
+    Private Property mUsageOut As Integer = 0
+
+    Public Sub Constructor()
+        Super.Constructor()
+        Me.mHeading.Text = "Agent"
+        Me.mHeading.FontSize = 13.0
+        Me.mHeading.Bold = True
+        Me.mContextLabel.FontSize = 11.0
+        Me.mStatus.FontSize = 11.0
+        Me.mAttachmentsLabel.FontSize = 11.0
+        Me.mProvider.Owner = Me
+        Me.mTranscriptArea.IsReadOnly = True
+        Me.mActivity.IsReadOnly = True
+        Me.mActivity.FontSize = 11.0
+        Me.mProposal.IsReadOnly = True
+        Me.mProposal.FontName = "monospace"
+        Me.mProposal.FontSize = 11.0
+        Me.mComposer.WordWrap = True
+        Me.ConfigureButton(Me.mAuth, "Sign in with ChatGPT", "auth")
+        Me.ConfigureButton(Me.mAttach, "Attach…", "attach")
+        Me.ConfigureButton(Me.mClearAttachments, "Clear", "clear-attachments")
+        Me.ConfigureButton(Me.mSend, "Send", "send")
+        Me.ConfigureButton(Me.mCancel, "Stop", "cancel")
+        Me.ConfigureButton(Me.mApprove, "Apply changes", "approve")
+        Me.ConfigureButton(Me.mReject, "Reject", "reject")
+        Me.ConfigureButton(Me.mCopyAll, "Copy chat", "copy-transcript")
+        Me.ConfigureButton(Me.mViewMode, "Native view", "toggle-view")
+        Me.AddSubview(Me.mAuth)
+        Me.AddSubview(Me.mHeading)
+        Me.AddSubview(Me.mProvider)
+        Me.mModel.Visible = False
+        Me.AddSubview(Me.mModel)
+        Me.AddSubview(Me.mContextLabel)
+        Me.AddSubview(Me.mCopyAll)
+        Me.AddSubview(Me.mViewMode)
+        Me.AddSubview(Me.mTranscriptArea)
+        Me.AddSubview(Me.mActivity)
+        Me.AddSubview(Me.mProposal)
+        Me.AddSubview(Me.mAttachmentsLabel)
+        Me.AddSubview(Me.mClearAttachments)
+        Me.AddSubview(Me.mComposer)
+        Me.AddSubview(Me.mAttach)
+        Me.AddSubview(Me.mSend)
+        Me.AddSubview(Me.mCancel)
+        Me.AddSubview(Me.mApprove)
+        Me.AddSubview(Me.mReject)
+        Me.AddSubview(Me.mStatus)
+        Me.mDropTarget.Owner = Me
+        Dim accepted As Array Of DragType = [DragType.FileList]
+        Me.mComposer.RegisterDropTarget(Me.mDropTarget, accepted)
+        Me.RegisterDropTarget(Me.mDropTarget, accepted)
+        Dim emptyContext As Array Of ChatContext = []
+        Me.SetContext(emptyContext)
+        Me.ClearProposal()
+        Me.RefreshAttachments()
+        If ChatPanel.WebTranscriptBlocker() = "" Then
+            ' Loading: the page is created on the first timer tick, after host setup.
+            Me.mRichState = 0
+            Me.mLoadStarted = 0
+            Me.mTicker.Owner = Me
+            Me.mTicker.Period = 250
+            Me.mTicker.Start()
+        Else
+            Me.mRichState = 2
+        End If
+        Me.ApplyTranscriptMode()
+        Me.LayoutPanel(500, 720)
+        Me.RefreshEnabled()
+    End Sub
+
+    Private Sub ConfigureButton(button As ChatActionButton, caption As String, actionName As String)
+        button.Owner = Me
+        button.Caption = caption
+        button.ActionName = actionName
+    End Sub
+
+    Public Sub AttachHost(host As ChatPanelHost)
+        Me.mHost = host
+        Me.RefreshAuthCaption()
+        Me.RefreshEnabled()
+    End Sub
+
+    ' ── Rich transcript plumbing ─────────────────────────────────────────────
+
+    ''' True once the HTML transcript has loaded and is receiving updates.
+    Public Property RichTranscriptActive As Boolean
+        Get
+            Return Me.mRichState = 1
+        End Get
+    End Property
+
+    ''' True when the panel shows the plain native transcript (no web engine, or forced).
+    Public Property PlainTranscript As Boolean
+        Get
+            Return Me.mRichState = 2
+        End Get
+    End Property
+
+    Internal Sub Tick()
+        If Me.mRichState = 0 And Me.mLoadStarted = 0 Then
+            Me.LoadTranscriptPage()
+            Return
+        End If
+        If Me.mRichState = 0 And System.Microseconds() - Me.mLoadStarted > ChatPanel.RichTimeoutMicroseconds Then
+            Me.UsePlainTranscript()
+        End If
+        If Me.mRichState <> 0 Then Me.mTicker.Stop()
+    End Sub
+
+    ''' Switch to the plain native transcript (also used when the web engine never starts).
+    Public Sub UsePlainTranscript()
+        If Me.mRichState = 2 Then Return
+        Me.mRichState = 2
+        Me.mTicker.Stop()
+        Me.ApplyTranscriptMode()
+        Me.LayoutPanel(Me.mWidth, Me.mHeight)
+        Me.RefreshEnabled()
+    End Sub
+
+    ''' Why the web transcript cannot run here, or "" when it can. WebKitGTK aborts the whole
+    ''' process when its bubblewrap sandbox cannot create user namespaces (containers, hosts
+    ''' with max_user_namespaces=0), so those hosts use the native transcript instead.
+    ''' BUOY_CHATKIT_PLAIN=1 forces native; WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS skips the check.
+    Public Shared Function WebTranscriptBlocker() As String
+        If System.EnvironmentVariable("BUOY_CHATKIT_PLAIN").Or("") = "1" Then Return "BUOY_CHATKIT_PLAIN=1"
+        #If TargetLinux Then
+            If System.EnvironmentVariable("WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS").Or("") <> "" Then Return ""
+            Dim dockerMarker As New FileSystemItem("/.dockerenv")
+            Dim podmanMarker As New FileSystemItem("/run/.containerenv")
+            If dockerMarker.Exists() Or podmanMarker.Exists() Then Return "container without a WebKit sandbox"
+            Dim limitFile As New FileSystemItem("/proc/sys/user/max_user_namespaces")
+            If limitFile.Exists() And String.Trim(limitFile.ReadAllText().Or("1")) = "0" Then Return "user namespaces are disabled"
+        #End If
+        Return ""
+    End Function
+
+    ''' Switch (back) to the web transcript. The full conversation is replayed once the
+    ''' page reports ready; if it never does, the panel returns to the plain transcript.
+    Public Sub UseRichTranscript()
+        If Me.mRichState <> 2 Then Return
+        Dim blocker As String = ChatPanel.WebTranscriptBlocker()
+        If blocker <> "" Then
+            Me.SetStatus("Web transcript unavailable: " + blocker)
+            Return
+        End If
+        Me.mRichState = 0
+        Me.LoadTranscriptPage()
+        Me.mTicker.Owner = Me
+        Me.mTicker.Period = 250
+        Me.mTicker.Start()
+    End Sub
+
+    Private Sub EnsureTranscriptView()
+        If Me.mTranscriptView <> Nil Then Return
+        ChatPanel.PrepareWebEngine()
+        Me.mTranscriptView = New ChatTranscriptView()
+        Me.mTranscriptView.Owner = Me
+        Me.AddSubview(Me.mTranscriptView)
+    End Sub
+
+    Private Sub LoadTranscriptPage()
+        Me.EnsureTranscriptView()
+        Me.ApplyTranscriptMode()
+        Me.mLoadStarted = System.Microseconds()
+        Me.mTranscriptView.LoadHTML(ChatTranscriptHTML())
+        Me.LayoutPanel(Me.mWidth, Me.mHeight)
+        Me.RefreshEnabled()
+    End Sub
+
+    Private Sub ApplyTranscriptMode()
+        Dim plain As Boolean = Me.mRichState = 2
+        If plain Then
+            Me.mPageFocused = False
+            Me.mPageBlurAt = 0
+        End If
+        Me.mViewMode.Caption = If(plain, "Web view", "Native view")
+        If Me.mTranscriptView <> Nil Then Me.mTranscriptView.Visible = Not plain
+        Me.mTranscriptArea.Visible = plain
+        If plain Then
+            Me.mTranscriptArea.Text = Me.DisplayText(Me.mTranscript)
+            Me.RenderActivity()
+        Else
+            ' The page owns the transcript; free the hidden native copy.
+            Me.mTranscriptArea.Text = ""
+        End If
+    End Sub
+
+    Internal Sub AcceptPageMessage(message As String)
+        If String.LenBytes(message) > 1048576 Then Return
+        ' Page messages are untrusted input: ignore anything that is not a JSON object.
+        Dim parsed As JSONItem
+        Try
+            parsed = Json.Parse(message)
+        Catch e As Exception
+            Return
+        End Try
+        If parsed = Nil Or Not parsed.IsObject() Then Return
+        Dim action As String = parsed.Value("action").AsString().Or("")
+        Dim id As String = parsed.Value("id").AsString().Or("")
+        Select Case action
+            Case "ready"
+                Me.OnTranscriptReady()
+            Case "fallback"
+                Me.UsePlainTranscript()
+            Case "approve", "reject"
+                ' Ignore stale buttons from resolved cards.
+                If id <> "" And id = Me.mCardId Then Me.Activate(action)
+            Case "suggest"
+                Me.mComposer.Text = parsed.Value("text").AsString().Or("")
+                Me.mComposer.SetFocus()
+            Case "copy"
+                Dim board As New Clipboard()
+                board.Text = parsed.Value("text").AsString().Or("")
+                Me.SetStatus("Copied to clipboard")
+            Case "copySelection"
+                ' Reply to CopyTranscriptSelection(); an empty selection copies nothing.
+                Dim selected As String = parsed.Value("text").AsString().Or("")
+                If selected = "" Then
+                    Me.SetStatus("Select transcript text to copy, or use Copy chat")
+                Else
+                    Dim board As New Clipboard()
+                    board.Text = selected
+                    Me.SetStatus("Copied selection")
+                End If
+            Case "focus"
+                Dim focused As Boolean = parsed.Value("focused").AsBoolean().Or(False)
+                If Me.mPageFocused And Not focused Then Me.mPageBlurAt = System.Microseconds()
+                Me.mPageFocused = focused
+            Case "openFile", "link"
+                Dim account As ChatPanelAccountHost = TryCast(Me.mHost, ChatPanelAccountHost)
+                If account = Nil Then Return
+                If action = "openFile" Then
+                    account.OpenChatFile(parsed.Value("path").AsString().Or(""))
+                Else
+                    Dim url As String = parsed.Value("url").AsString().Or("")
+                    If String.StartsWith(url, "http://", False) Or String.StartsWith(url, "https://", False) Then account.OpenChatLink(url)
+                End If
+        End Select
+    End Sub
+
+    Private Sub OnTranscriptReady()
+        If Me.mRichState = 2 Then Return
+        Me.EnsureTranscriptView()
+        Me.mPendingScript = ""
+        Me.mRichState = 1
+        Me.mTicker.Stop()
+        Me.ApplyTranscriptMode()
+        Dim script As String = "chat.reset();"
+        script += Me.ThemeScript()
+        If Me.mEmptyState <> Nil Then script += "chat.setEmpty(" + Json.Stringify(Me.mEmptyState) + ");"
+        For Each op As JSONItem In Me.mOps
+            script += Me.OpScript(op)
+        Next
+        script += Me.BusyScript()
+        Me.Run(script)
+        Me.LayoutPanel(Me.mWidth, Me.mHeight)
+        Me.RefreshEnabled()
+    End Sub
+
+    Private Function OpScript(op As JSONItem) As String
+        Return "chat." + op.Value("fn").AsString().Or("noop") + "(" + Json.Stringify(op.Value("args")) + ");"
+    End Function
+
+    Private Function ThemeScript() As String
+        If Me.mDark < 0 Then Return ""
+        Return "chat.setTheme({\"dark\":" + If(Me.mDark = 1, "true", "false") + "});"
+    End Function
+
+    Private Function BusyScript() As String
+        Dim args As JSONItem = JSONItem.NewObject()
+        args.Value("busy") = Me.mBusy
+        args.Value("label") = If(Me.mStatus.Text = "", "Thinking…", Me.mStatus.Text)
+        Return "chat.setBusy(" + Json.Stringify(args) + ");"
+    End Function
+
+    ''' Queues a script; streaming deltas and card updates reach the page in one batch per
+    ''' main-loop turn instead of one ExecuteJavaScript call each.
+    Private Sub Run(script As String)
+        If Me.mRichState <> 1 Or Me.mTranscriptView = Nil Then Return
+        Me.mPendingScript += script
+        If Me.mFlushScheduled Then Return
+        Me.mFlushScheduled = True
+        Me.mFlusher.Owner = Me
+        Me.mFlusher.Period = 16
+        ' Explicit stopping keeps batching single-shot and permits safe restarts.
+        Me.mFlusher.Count = -1
+        Me.mFlusher.Start()
+    End Sub
+
+    Internal Sub FlushScripts()
+        Me.mFlushScheduled = False
+        Dim script As String = Me.mPendingScript
+        Me.mPendingScript = ""
+        If script = "" Or Me.mRichState <> 1 Or Me.mTranscriptView = Nil Then Return
+        Me.mTranscriptView.ExecuteJavaScript(script)
+    End Sub
+
+    ''' WebKitGTK's DMA-BUF renderer stops repainting the page once a native control
+    ''' (the composer) takes focus on hosts without a working GPU buffer path, so the
+    ''' transcript uses shared-memory rendering unless the user chose otherwise.
+    Private Shared Sub PrepareWebEngine()
+        #If TargetLinux Then
+            If System.EnvironmentVariable("WEBKIT_DISABLE_DMABUF_RENDERER").Or("") = "" Then
+                Dim ignored As Int32 = ChatKitSetEnv("WEBKIT_DISABLE_DMABUF_RENDERER", "1", 0)
+            End If
+        #End If
+    End Sub
+
+    ''' Records an operation for replay and sends it live. A non-empty key coalesces
+    ''' later operations with the same key into the original transcript position.
+    Private Sub Emit(fn As String, args As JSONItem, key As String = "")
+        Dim op As JSONItem = JSONItem.NewObject()
+        op.Value("fn") = fn
+        op.Value("args") = args
+        If key <> "" And Me.mOpIndex.ContainsKey(key) Then
+            Me.mOps(Me.mOpIndex.Get(key).Or(0)) = op
+        Else
+            If key <> "" Then Me.mOpIndex.Set(key, Array.Count(Me.mOps))
+            Me.mOps.Append(op)
+        End If
+        Me.Run(Me.OpScript(op))
+    End Sub
+
+    ''' A card shown again (same id) is live again: neutralise its earlier resolution so a
+    ''' replay does not end with the old outcome after the re-shown card.
+    Private Sub ReviveCard(cardId As String)
+        If Not Me.mOpIndex.ContainsKey("resolve:" + cardId) Then Return
+        Dim args As JSONItem = JSONItem.NewObject()
+        args.Value("id") = cardId
+        args.Value("outcome") = ""
+        Me.Emit("resolveCard", args, "resolve:" + cardId)
+    End Sub
+
+    Private Function FindOp(key As String) As JSONItem
+        If Not Me.mOpIndex.ContainsKey(key) Then Return Nil
+        Return Me.mOps(Me.mOpIndex.Get(key).Or(0)).Value("args")
+    End Function
+
+    ''' Forces the transcript palette; by default it follows the system appearance.
+    Public Sub SetDarkAppearance(dark As Boolean)
+        Me.mDark = If(dark, 1, 0)
+        Me.Run(Me.ThemeScript())
+    End Sub
+
+    ''' Hero shown while the transcript is empty; suggestion chips fill the composer.
+    Public Sub SetEmptyState(title As String, subtitle As String, suggestions As Array Of String)
+        Dim args As JSONItem = JSONItem.NewObject()
+        args.Value("title") = title
+        args.Value("subtitle") = subtitle
+        Dim list As JSONItem = JSONItem.NewArray()
+        For Each suggestion As String In suggestions
+            list.Add(JSONItem.From(suggestion))
+        Next
+        args.Value("suggestions") = list
+        Me.mEmptyState = args
+        Me.Run("chat.setEmpty(" + Json.Stringify(args) + ");")
+    End Sub
+
+    ''' Clears the conversation (transcript, tool activity, statistics).
+    Public Sub ClearTranscript()
+        If Me.mBusy Then Throw New InvalidArgumentException("Cannot clear the transcript during a turn")
+        If Me.mCardId <> "" Then Throw New InvalidArgumentException("Resolve the pending proposal or permission first")
+        Me.mTranscript = ""
+        Me.mTools.Clear()
+        Me.mToolOrder = []
+        Me.mOps = []
+        Me.mOpIndex.Clear()
+        Me.mAssistantId = ""
+        Me.mLastAssistantId = ""
+        Me.mStatsId = ""
+        Me.mAssistantAuthor = ""
+        Me.mAssistantContinues = False
+        Me.mTranscriptArea.Text = ""
+        Me.mActivity.Text = ""
+        Me.Run("chat.reset();")
+        Me.LayoutPanel(Me.mWidth, Me.mHeight)
+    End Sub
+
+    ' ── Account ──────────────────────────────────────────────────────────────
+
+    ''' The host publishes verified identity and pending authentication independently of chat turns.
+    ''' One button toggles: "Sign in with ChatGPT" while signed out, "Sign out" while signed in.
+    Public Sub SetAuthenticationState(signedIn As Boolean, busy As Boolean = False)
+        If Me.mAuthenticated = signedIn And Me.mAuthBusy = busy Then Return
+        Me.mAuthenticated = signedIn
+        Me.mAuthBusy = busy
+        Me.RefreshAuthCaption()
+        Me.RefreshEnabled()
+        Me.LayoutPanel(Me.mWidth, Me.mHeight)
+    End Sub
+
+    Private Sub RefreshAuthCaption()
+        If Me.mAuthBusy Then
+            Me.mAuth.Caption = If(Me.mAuthenticated, "Working…", "Signing in…")
+        ElseIf Me.mAuthenticated Then
+            If TryCast(Me.mHost, ChatPanelAccountHost) <> Nil Then
+                Me.mAuth.Caption = "Sign out"
+            Else
+                Me.mAuth.Caption = "Signed in with ChatGPT"
+            End If
+        Else
+            Me.mAuth.Caption = "Sign in with ChatGPT"
+        End If
+    End Sub
+
+    Public Property AuthenticationCaption As String
+        Get
+            Return Me.mAuth.Caption
+        End Get
+    End Property
+
+    ''' Show account actions only for the backend that owns this authentication flow.
+    Public Sub SetAuthenticationVisible(visible As Boolean)
+        Me.mAuth.Visible = visible
+        Me.RefreshEnabled()
+        Me.LayoutPanel(Me.mWidth, Me.mHeight)
+    End Sub
+
+    Public Property AuthenticationVisible As Boolean
+        Get
+            Return Me.mAuth.Visible
+        End Get
+    End Property
+
+    ''' Call when closing the host window to release callbacks and stop accepting sends.
+    Public Sub DetachHost()
+        Me.mHost = Nil
+        Me.mTicker.Stop()
+        Me.mFlusher.Stop()
+        Me.RefreshEnabled()
+    End Sub
+
+    ' ── Providers, models, context ───────────────────────────────────────────
+
+    Public Sub SetProviders(providers As Array Of ChatProvider)
+        If Me.mBusy Then Throw New InvalidArgumentException("Cannot change providers during a turn")
+        Dim seen As New Set Of String()
+        For Each descriptor As ChatProvider In providers
+            If descriptor = Nil Then Throw New InvalidArgumentException("Nil provider")
+            If seen.Contains(descriptor.Id) Then Throw New InvalidArgumentException("Duplicate provider ID")
+            seen.Add(descriptor.Id)
+        Next
+        Me.mProviders = Array.Clone(providers)
+        Me.mProvider.RemoveAllItems()
+        For Each descriptor As ChatProvider In providers
+            Dim title As String = descriptor.Title
+            If Not descriptor.Available Then title += " · not configured"
+            Me.mProvider.AddItem(title)
+        Next
+        If Array.Count(providers) > 0 Then Me.mProvider.SelectedIndex = 0
+        Me.NotifyProviderChanged()
+    End Sub
+
+    ' Catalog entries are supplied by the selected backend; an empty catalog hides the picker.
+    Public Sub SetModels(models As JSONItem, selectedModel As String = "")
+        If Me.mBusy Then Throw New InvalidArgumentException("Cannot change models during a turn")
+        If models = Nil Then Throw New InvalidArgumentException("Model catalog is required")
+        If Not models.IsArray() Or models.Count() > 512 Then Throw New InvalidArgumentException("Invalid model catalog")
+        Dim ids As Array Of String = []
+        ids.Append("")
+        Dim titles As Array Of String = []
+        titles.Append("Model: provider default")
+        Dim seen As New Set Of String()
+        For index As Integer = 0 To models.Count() - 1
+            Dim entry As JSONItem = models.ValueAt(index)
+            Dim id As String = entry.Value("model").AsString().Or("")
+            If id = "" Or String.LenBytes(id) > 256 Then Throw New InvalidArgumentException("Invalid model ID")
+            If seen.Contains(id) Then Throw New InvalidArgumentException("Duplicate model ID")
+            seen.Add(id)
+            ids.Append(id)
+            Dim title As String = entry.Value("displayName").AsString().Or(id)
+            If title = "" Then title = id
+            titles.Append(String.Left(title, 256))
+        Next
+        Me.mModelIds = ids
+        Me.mModel.RemoveAllItems()
+        For Each title As String In titles
+            Me.mModel.AddItem(title)
+        Next
+        Me.mModel.SelectedIndex = 0
+        For index As Integer = 0 To Array.Count(ids) - 1
+            If ids(index) = selectedModel Then Me.mModel.SelectedIndex = index
+        Next
+        Me.mModel.Visible = models.Count() > 0
+        Me.LayoutPanel(Me.mWidth, Me.mHeight)
+        Me.RefreshEnabled()
+    End Sub
+
+    Public Property SelectedModel As String
+        Get
+            Dim index As Integer = Me.mModel.SelectedIndex
+            If index < 0 Or index >= Array.Count(Me.mModelIds) Then Return ""
+            Return Me.mModelIds(index)
+        End Get
+    End Property
+
+    Public Sub SelectModel(model As String)
+        If Me.mBusy Then Throw New InvalidArgumentException("Cannot change model during a turn")
+        For index As Integer = 0 To Array.Count(Me.mModelIds) - 1
+            If Me.mModelIds(index) = model Then
+                Me.mModel.SelectedIndex = index
+                Return
+            End If
+        Next
+        Throw New InvalidArgumentException("Unknown model")
+    End Sub
+
+    Public Sub SelectProvider(providerId As String)
+        If Me.mBusy Then Throw New InvalidArgumentException("Cannot change provider during a turn")
+        For i As Integer = 0 To Array.Count(Me.mProviders) - 1
+            If Me.mProviders(i).Id = providerId Then
+                Me.mProvider.SelectedIndex = i
+                Me.NotifyProviderChanged()
+                Return
+            End If
+        Next
+        Throw New InvalidArgumentException("Unknown provider")
+    End Sub
+
+    Public Property SelectedProviderId As String
+        Get
+            Dim index As Integer = Me.mProvider.SelectedIndex
+            If index < 0 Or index >= Array.Count(Me.mProviders) Then Return ""
+            Return Me.mProviders(index).Id
+        End Get
+    End Property
+
+    Public Property SelectedProviderAvailable As Boolean
+        Get
+            Dim index As Integer = Me.mProvider.SelectedIndex
+            If index < 0 Or index >= Array.Count(Me.mProviders) Then Return False
+            Return Me.mProviders(index).Available
+        End Get
+    End Property
+
+    Private Property SelectedProviderTitle As String
+        Get
+            Dim index As Integer = Me.mProvider.SelectedIndex
+            If index < 0 Or index >= Array.Count(Me.mProviders) Then Return "Assistant"
+            Return Me.mProviders(index).Title
+        End Get
+    End Property
+
+    Public Sub SetContext(items As Array Of ChatContext)
+        Dim caption As String = "Context: none"
+        Dim seen As New Set Of String()
+        For Each item As ChatContext In items
+            If item = Nil Then Throw New InvalidArgumentException("Nil context item")
+            If seen.Contains(item.ItemId) Then Throw New InvalidArgumentException("Duplicate context item")
+            seen.Add(item.ItemId)
+        Next
+        Me.mContext = Array.Clone(items)
+        If Array.Count(items) > 0 Then
+            caption = "Context: "
+            For i As Integer = 0 To Array.Count(items) - 1
+                If i > 0 Then caption += ", "
+                caption += items(i).Title + " · v" + String.From(items(i).Version)
+            Next
+        End If
+        Me.mContextLabel.Text = caption
+    End Sub
+
+    Public Property ContextIds As Array Of String
+        Get
+            Dim ids As Array Of String = []
+            For Each item As ChatContext In Me.mContext
+                ids.Append(item.ItemId)
+            Next
+            Return ids
+        End Get
+    End Property
+
+    Public Property ComposerText As String
+        Get
+            Return Me.mComposer.Text
+        End Get
+        Set
+            Me.mComposer.Text = value
+        End Set
+    End Property
+
+    Public Property TranscriptText As String
+        Get
+            Return Me.mTranscript
+        End Get
+    End Property
+
+    Public Property IsBusy As Boolean
+        Get
+            Return Me.mBusy
+        End Get
+    End Property
+
+    Public Property ProposalId As String
+        Get
+            Return Me.mProposalId
+        End Get
+    End Property
+
+    ' ── Attachments ──────────────────────────────────────────────────────────
+
+    ''' Files queued for the next prompt. Hosts read this inside SendMessage; the panel clears
+    ''' it after a successful send and shows the files on the user's message.
+    Public Property PendingAttachments As Array Of ChatAttachment
+        Get
+            If Me.mSending Then Return Array.Clone(Me.mSendingAttachments)
+            Return Array.Clone(Me.mAttachments)
+        End Get
+    End Property
+
+    Public Sub AddAttachment(attachment As ChatAttachment)
+        If attachment = Nil Then Throw New InvalidArgumentException("Attachment is required")
+        If Array.Count(Me.mAttachments) >= 16 Then Throw New InvalidArgumentException("At most 16 attachments per message")
+        For Each existing As ChatAttachment In Me.mAttachments
+            If String.Compare(existing.Path, attachment.Path, True) = 0 Then Return
+        Next
+        Me.mAttachments.Append(attachment)
+        Me.RefreshAttachments()
+    End Sub
+
+    Public Sub AttachFile(item As FileSystemItem)
+        Me.AddAttachment(ChatAttachment.FromFile(item))
+    End Sub
+
+    Public Sub ClearAttachments()
+        Me.mAttachments = []
+        Me.RefreshAttachments()
+    End Sub
+
+    Private Sub RefreshAttachments()
+        Dim count As Integer = Array.Count(Me.mAttachments)
+        If count = 0 Then
+            Me.mAttachmentsLabel.Text = ""
+        Else
+            Dim names As String = ""
+            For Each attachment As ChatAttachment In Me.mAttachments
+                If names <> "" Then names += ", "
+                names += attachment.Name
+            Next
+            Me.mAttachmentsLabel.Text = "📎 " + names
+        End If
+        Dim show As Boolean = count > 0
+        If Me.mAttachmentsLabel.Visible <> show Then
+            Me.mAttachmentsLabel.Visible = show
+            Me.mClearAttachments.Visible = show
+            Me.LayoutPanel(Me.mWidth, Me.mHeight)
+        End If
+    End Sub
+
+    Private Sub ChooseAttachments()
+        Dim dialog As New OpenFileDialog()
+        dialog.Title = "Attach Files"
+        dialog.AllowMultipleFiles = True
+        dialog.AddFilter("Images and documents", "*.png;*.jpg;*.jpeg;*.gif;*.webp;*.bmp;*.svg;*.pdf;*.md;*.txt;*.bui;*.json;*.log;*.csv")
+        dialog.AddFilter("All Files", "*")
+        If Not dialog.Show(Nil) Then Return
+        For i As Integer = 0 To dialog.SelectedItemCount - 1
+            Me.AttachFile(dialog.SelectedItemAt(i))
+        Next
+    End Sub
+
+    ' ── Status and busy ──────────────────────────────────────────────────────
+
+    Public Sub SetBusy(busy As Boolean)
+        Dim wasBusy As Boolean = Me.mBusy
+        Me.mBusy = busy
+        If busy And Not wasBusy Then
+            Me.mStreamStart = 0
+            Me.mStreamChars = 0
+            Me.mUsageIn = 0
+            Me.mUsageOut = 0
+        End If
+        If Not busy Then
+            If wasBusy Then Me.PublishStats(True)
+            Me.CloseAssistantSegment()
+            Me.mAssistantContinues = False
+        End If
+        Me.Run(Me.BusyScript())
+        Me.RefreshEnabled()
+    End Sub
+
+    Public Sub SetStatus(message As String)
+        Me.mStatus.Text = message
+        If Me.mBusy Then Me.Run(Me.BusyScript())
+    End Sub
+
+    ''' Real token counts from the provider replace the streamed-character estimate.
+    Public Sub SetUsage(inputTokens As Integer, outputTokens As Integer)
+        Me.mUsageIn = Math.Max(0, inputTokens)
+        Me.mUsageOut = Math.Max(0, outputTokens)
+        Me.PublishStats(True)
+    End Sub
+
+    Private Sub PublishStats(force As Boolean)
+        If Me.mLastAssistantId = "" Or (Me.mStreamChars = 0 And Me.mUsageOut = 0) Then Return
+        Dim now As Integer = System.Microseconds()
+        If Not force And now - Me.mStatsSent < 250000 Then Return
+        Me.mStatsSent = now
+        Dim estimated As Boolean = Me.mUsageOut = 0
+        Dim tokens As Integer = Me.mUsageOut
+        If estimated Then tokens = Math.Max(1, (Me.mStreamChars + 3) \ 4)
+        Dim elapsed As Integer = 0
+        If Me.mStreamStart > 0 Then elapsed = now - Me.mStreamStart
+        If Me.mStatsId <> "" And Me.mStatsId <> Me.mLastAssistantId Then
+            ' Turn statistics move to the newest reply segment.
+            Dim cleared As JSONItem = JSONItem.NewObject()
+            cleared.Value("id") = Me.mStatsId
+            Me.Emit("setStats", cleared, "stats:" + Me.mStatsId)
+        End If
+        Me.mStatsId = Me.mLastAssistantId
+        Dim args As JSONItem = JSONItem.NewObject()
+        args.Value("id") = Me.mLastAssistantId
+        args.Value("tokensOut") = tokens
+        args.Value("tokensIn") = Me.mUsageIn
+        args.Value("elapsedMs") = elapsed \ 1000
+        Dim seconds As Double = elapsed
+        seconds = seconds / 1000000.0
+        If seconds > 0.25 Then
+            Dim rate As Double = tokens
+            args.Value("tokensPerSecond") = Math.Round(rate / seconds)
+        End If
+        args.Value("estimated") = estimated
+        Me.Emit("setStats", args, "stats:" + Me.mLastAssistantId)
+    End Sub
+
+    ''' Ends the open reply segment; text arriving later (after a tool call, card or
+    ''' notice) continues the reply in a new segment below it, in transcript order.
+    Private Sub CloseAssistantSegment()
+        If Me.mAssistantId = "" Then Return
+        Dim args As JSONItem = JSONItem.NewObject()
+        args.Value("id") = Me.mAssistantId
+        Me.Emit("finishMessage", args, "finish:" + Me.mAssistantId)
+        Me.mAssistantId = ""
+        Me.mAssistantContinues = True
+    End Sub
+
+    ' ── Transcript content ───────────────────────────────────────────────────
+
+    ' BUI-802: Win32 TextArea renders CRLF; keep transcript/model data unchanged.
+    Private Function DisplayText(text As String) As String
+        #If TargetWindows Then
+            Return String.Replace(String.Replace(text, "\r\n", "\n", True), "\n", "\r\n", True)
+        #Else
+            Return text
+        #End If
+    End Function
+
+    Private Function RoleKind(role As String) As String
+        Dim lower As String = String.LCase(role)
+        If lower = "you" Or lower = "user" Then Return "user"
+        If String.Contains(lower, "error") Or String.Contains(lower, "failed") Then Return "error"
+        If lower = "assistant" Or String.Contains(lower, "agent") Or lower = "claude" Or lower = "codex" Or lower = "chatgpt" Then
+            If String.Contains(lower, "approval") Then Return "notice"
+            Return "assistant"
+        End If
+        If lower = "system" Then Return "system"
+        Return "notice"
+    End Function
+
+    Public Sub AppendMessage(role As String, text As String)
+        If role = "" Then Throw New InvalidArgumentException("Message role is required")
+        Dim kind As String = Me.RoleKind(role)
+        Dim author As String = role
+        If kind = "assistant" And String.LCase(role) = "assistant" Then author = Me.SelectedProviderTitle
+        If kind = "user" Then author = "You"
+        Dim attachments As Array Of ChatAttachment = []
+        If kind = "user" And Me.mSending Then
+            attachments = Me.mSendingAttachments
+            Me.mSendingAttachments = []
+        End If
+        Me.AppendChatMessage(kind, author, text, attachments, role)
+    End Sub
+
+    ''' Adds a message with an explicit kind ("user", "assistant", "system", "notice", "error").
+    Public Sub AppendChatMessage(kind As String, author As String, text As String, attachments As Array Of ChatAttachment, transcriptRole As String = "")
+        Dim role As String = transcriptRole
+        If role = "" Then role = author
+        If Me.mTranscript <> "" Then Me.mTranscript += "\n\n"
+        Me.mTranscript += role + "\n" + text
+        For Each attachment As ChatAttachment In attachments
+            Me.mTranscript += "\n[attachment] " + attachment.Name
+        Next
+        If Me.mRichState = 2 Then Me.mTranscriptArea.Text = Me.DisplayText(Me.mTranscript)
+        If kind = "assistant" And text = "" And Array.Count(attachments) = 0 Then
+            ' An empty reply placeholder renders nothing until text streams in.
+            Me.CloseAssistantSegment()
+            Me.mAssistantAuthor = author
+            Me.mAssistantContinues = False
+            Return
+        End If
+        Me.EmitMessage(kind, author, text, attachments)
+    End Sub
+
+    ''' Adds the rich message only; the plain transcript is maintained by the caller.
+    Private Sub EmitMessage(kind As String, author As String, text As String, attachments As Array Of ChatAttachment)
+        Me.CloseAssistantSegment()
+        Me.mMessageCounter += 1
+        Dim id As String = "m" + String.From(Me.mMessageCounter)
+        Dim args As JSONItem = JSONItem.NewObject()
+        args.Value("id") = id
+        args.Value("role") = kind
+        args.Value("author") = author
+        args.Value("text") = text
+        Dim list As JSONItem = JSONItem.NewArray()
+        For Each attachment As ChatAttachment In attachments
+            list.Add(attachment.ToJSON())
+        Next
+        args.Value("attachments") = list
+        If kind = "assistant" Then args.Value("continuation") = Me.mAssistantContinues
+        Me.Emit("addMessage", args, "message:" + id)
+        If kind = "assistant" Then
+            Me.mAssistantId = id
+            Me.mLastAssistantId = id
+            Me.mAssistantAuthor = author
+            If text <> "" Then Me.CountStreamed(text)
+        ElseIf kind = "user" Then
+            ' The next streamed text starts a fresh assistant reply with its own header.
+            Me.mAssistantContinues = False
+            Me.mLastAssistantId = ""
+            Me.mStatsId = ""
+            Me.mAssistantAuthor = ""
+        End If
+    End Sub
+
+    Private Sub CountStreamed(text As String)
+        If Me.mStreamStart = 0 Then Me.mStreamStart = System.Microseconds()
+        Me.mStreamChars += String.Len(text)
+    End Sub
+
+    Public Sub AppendAssistantDelta(text As String)
+        If text = "" Then Return
+        Me.mTranscript += text
+        If Me.mRichState = 2 Then Me.mTranscriptArea.Text = Me.DisplayText(Me.mTranscript)
+        If Me.mAssistantId = "" Then
+            Dim noAttachments As Array Of ChatAttachment = []
+            Dim author As String = Me.mAssistantAuthor
+            If author = "" Then author = Me.SelectedProviderTitle
+            Me.EmitMessage("assistant", author, "", noAttachments)
+        End If
+        Dim stored As JSONItem = Me.FindOp("message:" + Me.mAssistantId)
+        If stored <> Nil Then stored.Value("text") = stored.Value("text").AsString().Or("") + text
+        Me.CountStreamed(text)
+        Dim args As JSONItem = JSONItem.NewObject()
+        args.Value("id") = Me.mAssistantId
+        args.Value("text") = text
+        Me.Run("chat.appendDelta(" + Json.Stringify(args) + ");")
+        Me.PublishStats(False)
+    End Sub
+
+    Public Sub AppendToolActivity(toolId As String, title As String, status As String)
+        Me.AppendToolCall(toolId, title, status, "", "", "")
+    End Sub
+
+    ''' Inline tool row. Later calls with the same toolId update the row in place.
+    ''' status: "running", "complete" or "failed" (other text is shown as detail).
+    Public Sub AppendToolCall(toolId As String, name As String, status As String, detail As String, input As String, output As String)
+        If toolId = "" Then Throw New InvalidArgumentException("Tool ID is required")
+        If Not Me.mTools.ContainsKey(toolId) Then
+            Me.mToolOrder.Append(toolId)
+            Me.CloseAssistantSegment()
+        End If
+        Me.mTools.Set(toolId, name + " · " + status)
+        Dim state As String = String.LCase(status)
+        Dim shownDetail As String = detail
+        If state <> "running" And state <> "complete" And state <> "failed" Then
+            If shownDetail = "" Then shownDetail = status
+            state = "complete"
+            If String.Contains(String.LCase(status), "fail") Or String.Contains(String.LCase(status), "error") Then state = "failed"
+            If String.Contains(String.LCase(status), "start") Or String.Contains(String.LCase(status), "progress") Then state = "running"
+        End If
+        Dim args As JSONItem = JSONItem.NewObject()
+        args.Value("id") = toolId
+        args.Value("name") = name
+        args.Value("status") = state
+        args.Value("detail") = shownDetail
+        If input <> "" Then args.Value("input") = String.Left(input, 65536)
+        If output <> "" Then args.Value("output") = String.Left(output, 65536)
+        Me.Emit("upsertTool", args, "tool:" + toolId)
+        If Me.mRichState = 2 Then Me.RenderActivity()
+        If Array.Count(Me.mToolOrder) = 1 Then Me.LayoutPanel(Me.mWidth, Me.mHeight)
+    End Sub
+
+    Private Sub RenderActivity()
+        Dim text As String = ""
+        For Each key As String In Me.mToolOrder
+            If text <> "" Then text += "\n"
+            text += Me.mTools.Get(key).Or("")
+        Next
+        Me.mActivity.Text = Me.DisplayText(text)
+    End Sub
+
+    ' ── Proposal and permission cards ────────────────────────────────────────
+
+    Public Sub ShowProposal(proposalId As String, preview As String)
+        Dim files As Array Of ChatFileChange = []
+        Me.ShowProposalChanges(proposalId, "", preview, files)
+    End Sub
+
+    ''' Proposal card with per-file unified diffs. `preview` is the plain-text fallback.
+    Public Sub ShowProposalChanges(proposalId As String, title As String, preview As String, files As Array Of ChatFileChange)
+        If proposalId = "" Then Throw New InvalidArgumentException("Proposal ID is required")
+        Me.CloseAssistantSegment()
+        Me.ResolveCurrentCard("dismissed")
+        Me.mPermission = False
+        Me.mApprove.Caption = "Apply changes"
+        Me.mReject.Caption = "Reject"
+        Me.mProposalId = proposalId
+        Me.mCardId = "proposal-" + proposalId
+        Me.mProposal.Text = Me.DisplayText(preview)
+        Dim args As JSONItem = JSONItem.NewObject()
+        args.Value("id") = Me.mCardId
+        args.Value("title") = title
+        args.Value("canApply") = True
+        Dim list As JSONItem = JSONItem.NewArray()
+        For Each change As ChatFileChange In files
+            Dim entry As JSONItem = JSONItem.NewObject()
+            entry.Value("path") = change.Path
+            entry.Value("revision") = change.Revision
+            entry.Value("added") = change.Added
+            entry.Value("removed") = change.Removed
+            entry.Value("diff") = change.DiffText
+            list.Add(entry)
+        Next
+        If Array.Count(files) = 0 And preview <> "" Then
+            Dim entry As JSONItem = JSONItem.NewObject()
+            entry.Value("path") = "Preview"
+            ' Render preview text as unchanged context lines of a diff block.
+            Dim contextLines As String = ""
+            For Each line As String In String.Split(preview, "\n")
+                If contextLines <> "" Then contextLines += "\n"
+                contextLines += " " + line
+            Next
+            entry.Value("diff") = contextLines
+            list.Add(entry)
+        End If
+        args.Value("files") = list
+        Me.Emit("showProposal", args, "card:" + Me.mCardId)
+        Me.ReviveCard(Me.mCardId)
+        Me.RefreshEnabled()
+        Me.LayoutPanel(Me.mWidth, Me.mHeight)
+    End Sub
+
+    Public Sub ShowPermission(title As String, details As String, canAccept As Boolean = True)
+        Me.CloseAssistantSegment()
+        Me.ResolveCurrentCard("dismissed")
+        Me.mPermission = True
+        Me.mPermissionCanAccept = canAccept
+        Me.mProposalId = ""
+        Me.mCardCounter += 1
+        Me.mCardId = "permission-" + String.From(Me.mCardCounter)
+        Me.mProposal.Text = Me.DisplayText(title + "\n" + details)
+        Me.mApprove.Caption = "Allow once"
+        Me.mReject.Caption = "Deny"
+        Dim args As JSONItem = JSONItem.NewObject()
+        args.Value("id") = Me.mCardId
+        args.Value("title") = title
+        args.Value("details") = String.Left(details, 65536)
+        args.Value("canAccept") = canAccept
+        Me.Emit("showPermission", args, "card:" + Me.mCardId)
+        Me.ReviveCard(Me.mCardId)
+        Me.RefreshEnabled()
+        Me.LayoutPanel(Me.mWidth, Me.mHeight)
+    End Sub
+
+    Private Sub ResolveCurrentCard(outcome As String)
+        If Me.mCardId = "" Then Return
+        Dim args As JSONItem = JSONItem.NewObject()
+        args.Value("id") = Me.mCardId
+        args.Value("outcome") = outcome
+        Me.Emit("resolveCard", args, "resolve:" + Me.mCardId)
+        Me.mCardId = ""
+    End Sub
+
+    Public Sub ClearProposal()
+        Me.ResolveCurrentCard("dismissed")
+        Me.mPermission = False
+        Me.mApprove.Caption = "Apply changes"
+        Me.mReject.Caption = "Reject"
+        Me.mProposalId = ""
+        Me.mProposal.Text = Me.DisplayText("Proposed project changes appear here.\nThe project remains unchanged until Apply changes.")
+        Me.RefreshEnabled()
+        Me.LayoutPanel(Me.mWidth, Me.mHeight)
+    End Sub
+
+    ' ── Actions ──────────────────────────────────────────────────────────────
+
+    Private Sub RefreshEnabled()
+        Dim account As Boolean = TryCast(Me.mHost, ChatPanelAccountHost) <> Nil
+        Me.mAuth.Enabled = Me.mAuth.Visible And Not Me.mBusy And Not Me.mAuthBusy And Me.mHost <> Nil And (Not Me.mAuthenticated Or account)
+        Me.mProvider.Enabled = Not Me.mBusy
+        Me.mModel.Enabled = Not Me.mBusy
+        Me.mComposer.Enabled = Not Me.mBusy
+        Me.mAttach.Enabled = Not Me.mBusy
+        Me.mClearAttachments.Enabled = Not Me.mBusy
+        Me.mSend.Enabled = Not Me.mBusy And Me.mHost <> Nil And Me.SelectedProviderAvailable
+        Me.mCancel.Enabled = Me.mBusy And Me.mHost <> Nil
+        Me.mApprove.Enabled = ((Me.mPermission And Me.mPermissionCanAccept) Or (Me.mProposalId <> "" And Not Me.mBusy)) And Me.mHost <> Nil
+        Me.mReject.Enabled = (Me.mPermission Or (Me.mProposalId <> "" And Not Me.mBusy)) And Me.mHost <> Nil
+        ' Switching to web needs a usable engine; native is always available.
+        Me.mViewMode.Enabled = Me.mRichState <> 2 Or ChatPanel.WebTranscriptBlocker() = ""
+    End Sub
+
+    Internal Sub NotifyProviderChanged()
+        Dim index As Integer = Me.mProvider.SelectedIndex
+        If index >= 0 And index < Array.Count(Me.mProviders) Then Me.mStatus.Text = Me.mProviders(index).Detail
+        Me.RefreshEnabled()
+        If Me.mHost <> Nil Then Me.mHost.ProviderChanged(Me.SelectedProviderId)
+    End Sub
+
+    Internal Sub Activate(actionName As String)
+        Select Case actionName
+            Case "attach"
+                If Not Me.mBusy Then Me.ChooseAttachments()
+                Return
+            Case "clear-attachments"
+                If Not Me.mBusy Then Me.ClearAttachments()
+                Return
+            Case "copy-transcript"
+                Me.CopyTranscript()
+                Return
+            Case "toggle-view"
+                Me.ToggleTranscriptMode()
+                Return
+        End Select
+        If Me.mHost = Nil Then Return
+        Select Case actionName
+            Case "auth"
+                If Not Me.mAuth.Visible Or Me.mBusy Or Me.mAuthBusy Then Return
+                If Me.mAuthenticated Then
+                    Dim account As ChatPanelAccountHost = TryCast(Me.mHost, ChatPanelAccountHost)
+                    If account <> Nil Then account.SignOutOfChatGPT()
+                Else
+                    Me.mHost.SignInWithChatGPT()
+                End If
+            Case "send"
+                If Me.mBusy Or Me.mSending Or Not Me.SelectedProviderAvailable Or String.Trim(Me.mComposer.Text) = "" Then Return
+                Dim prompt As String = Me.mComposer.Text
+                Dim sending As Array Of ChatAttachment = Array.Clone(Me.mAttachments)
+                Me.mSendingAttachments = sending
+                Me.mSending = True
+                Try
+                    Me.mHost.SendMessage(Me.SelectedProviderId, prompt, Me.ContextIds)
+                    If String.Compare(Me.mComposer.Text, prompt, True) = 0 Then Me.mComposer.Text = ""
+                    Me.mAttachments = []
+                    Me.RefreshAttachments()
+                Finally
+                    Me.mSending = False
+                    Me.mSendingAttachments = []
+                End Try
+            Case "cancel"
+                If Me.mBusy Then Me.mHost.CancelTurn()
+            Case "approve"
+                If Me.mPermission Then
+                    If Not Me.mPermissionCanAccept Then Return
+                    Me.ResolveCurrentCard("allowed")
+                    Me.ClearProposal()
+                    Me.mHost.ResolvePermission(True)
+                    Return
+                End If
+                If Me.mProposalId <> "" And Not Me.mBusy Then
+                    Dim proposalId As String = Me.mProposalId
+                    Me.ResolveCurrentCard("applied")
+                    Me.ClearProposal()
+                    Me.mHost.ApproveProposal(proposalId)
+                End If
+            Case "reject"
+                If Me.mPermission Then
+                    Me.ResolveCurrentCard("denied")
+                    Me.ClearProposal()
+                    Me.mHost.ResolvePermission(False)
+                    Return
+                End If
+                If Me.mProposalId <> "" And Not Me.mBusy Then
+                    Dim proposalId As String = Me.mProposalId
+                    Me.ResolveCurrentCard("rejected")
+                    Me.ClearProposal()
+                    Me.mHost.RejectProposal(proposalId)
+                End If
+        End Select
+    End Sub
+
+    Public Sub PerformSignIn()
+        Me.mAuth.InvokeAction()
+    End Sub
+
+    Public Sub PerformSend()
+        Me.mSend.InvokeAction()
+    End Sub
+    Public Sub PerformCancel()
+        Me.mCancel.InvokeAction()
+    End Sub
+    Public Sub PerformApprove()
+        Me.mApprove.InvokeAction()
+    End Sub
+    Public Sub PerformReject()
+        Me.mReject.InvokeAction()
+    End Sub
+    ''' Test hook: deliver a page message as if the transcript posted it.
+    Public Sub PerformPageMessage(message As String)
+        Me.AcceptPageMessage(message)
+    End Sub
+
+    ' ── Transcript copy and view mode ────────────────────────────────────────
+
+    ''' Switches between the web (WebKit/WebView2) and native transcripts and tells a
+    ''' ChatPanelViewHost so it can persist the choice.
+    Public Sub ToggleTranscriptMode()
+        Dim wasPlain As Boolean = Me.mRichState = 2
+        If wasPlain Then
+            Me.UseRichTranscript()
+        Else
+            Me.UsePlainTranscript()
+        End If
+        Dim nowPlain As Boolean = Me.mRichState = 2
+        ' A blocked web engine leaves the panel native: nothing changed, nothing to persist.
+        If nowPlain = wasPlain Then Return
+        Dim viewHost As ChatPanelViewHost = TryCast(Me.mHost, ChatPanelViewHost)
+        If viewHost <> Nil Then viewHost.TranscriptModeChanged(nowPlain)
+    End Sub
+
+    ''' Puts the full raw conversation (RawTranscriptText) on the clipboard.
+    Public Sub CopyTranscript()
+        Dim text As String = Me.RawTranscriptText
+        If text = "" Then
+            Me.SetStatus("The conversation is empty")
+            Return
+        End If
+        Dim board As New Clipboard()
+        board.Text = text
+        Me.SetStatus("Copied the full conversation")
+    End Sub
+
+    ''' True when the web transcript holds keyboard focus, so Edit > Copy and Select All
+    ''' belong to it. The native transcript is a TextArea and handles those itself.
+    Public Property TranscriptHasFocus As Boolean
+        Get
+            If Me.mRichState <> 1 Or Me.mTranscriptView = Nil Then Return False
+            If Not Me.mTranscriptView.Visible Then Return False
+            ' A focused native field in the panel always owns its own edit commands.
+            If Me.mComposer.HasFocus() Or Me.mTranscriptArea.HasFocus() Then Return False
+            If Me.mPageFocused Or Me.mTranscriptView.HasFocus() Then Return True
+            #If TargetMac Then
+                ' AppKit menus never take focus from the page; no grace period needed.
+                Return False
+            #Else
+                Return Me.mPageBlurAt > 0 And System.Microseconds() - Me.mPageBlurAt < ChatPanel.BlurGraceMicroseconds
+            #End If
+        End Get
+    End Property
+
+    ''' Copies the web transcript's current text selection (asynchronous: the page replies).
+    Public Sub CopyTranscriptSelection()
+        If Me.mRichState = 1 Then
+            Me.Run("chat.copySelection();")
+            Return
+        End If
+        Me.CopyTranscript()
+    End Sub
+
+    ''' Selects the whole web transcript. The native transcript only takes focus; its
+    ''' TextArea answers the platform Select All command itself.
+    Public Sub SelectAllTranscript()
+        If Me.mRichState = 1 Then
+            Me.Run("chat.selectAll();")
+            Return
+        End If
+        Me.mTranscriptArea.SetFocus()
+    End Sub
+
+    ''' True when the conversation has any content (cheap; for menu enabling).
+    Public Property HasTranscript As Boolean
+        Get
+            Return Array.Count(Me.mOps) > 0 Or Me.mTranscript <> ""
+        End Get
+    End Property
+
+    ''' The last assistant reply as plain text, or "".
+    Public Property LastReplyText As String
+        Get
+            Dim reply As String = ""
+            Dim collecting As Boolean = False
+            For Each op As JSONItem In Me.mOps
+                If op.Value("fn").AsString().Or("") = "addMessage" Then
+                    Dim args As JSONItem = op.Value("args")
+                    Dim role As String = args.Value("role").AsString().Or("")
+                    If role = "assistant" Then
+                        Dim text As String = args.Value("text").AsString().Or("")
+                        If args.Value("continuation").AsBoolean().Or(False) And collecting Then
+                            If reply <> "" And text <> "" Then reply += "\n\n"
+                            reply += text
+                        Else
+                            reply = text
+                        End If
+                        collecting = True
+                    ElseIf role = "user" Then
+                        collecting = False
+                    End If
+                End If
+            Next
+            Return reply
+        End Get
+    End Property
+
+    ''' The entire conversation as plain Markdown-style text: every message, tool call
+    ''' (with input and output), proposal diff, permission request and outcome, in order.
+    ''' Identical in web and native modes.
+    Public Property RawTranscriptText As String
+        Get
+            Dim outcomes As Map Of String, String = New Map Of String, String()
+            For Each op As JSONItem In Me.mOps
+                If op.Value("fn").AsString().Or("") = "resolveCard" Then
+                    Dim resolved As JSONItem = op.Value("args")
+                    outcomes.Set(resolved.Value("id").AsString().Or(""), resolved.Value("outcome").AsString().Or(""))
+                End If
+            Next
+            Dim out As String = ""
+            ' Kind of the last section written: a reply continued after anything but its
+            ' own text or a tool row gets its author header again.
+            Dim lastKind As String = ""
+            For Each op As JSONItem In Me.mOps
+                Dim fn As String = op.Value("fn").AsString().Or("")
+                Dim args As JSONItem = op.Value("args")
+                Dim section As String = ""
+                Select Case fn
+                    Case "addMessage"
+                        Dim text As String = args.Value("text").AsString().Or("")
+                        Dim role As String = args.Value("role").AsString().Or("")
+                        Dim continued As Boolean = args.Value("continuation").AsBoolean().Or(False) And (lastKind = "assistant" Or lastKind = "tool")
+                        If Not continued Then section = "## " + args.Value("author").AsString().Or(role) + "\n\n"
+                        section += text
+                        Dim files As JSONItem = args.Value("attachments")
+                        If files <> Nil And files.IsArray() Then
+                            For i As Integer = 0 To files.Count - 1
+                                section += "\n[attachment] " + files.ValueAt(i).Value("name").AsString().Or("")
+                            Next
+                        End If
+                        If continued And String.Trim(section) = "" Then section = ""
+                        If section <> "" Then lastKind = role
+                    Case "upsertTool"
+                        section = "> Tool: " + args.Value("name").AsString().Or("") + " (" + args.Value("status").AsString().Or("") + ")"
+                        Dim detail As String = args.Value("detail").AsString().Or("")
+                        If detail <> "" Then section += "\n> " + String.Replace(detail, "\n", "\n> ", True)
+                        Dim input As String = args.Value("input").AsString().Or("")
+                        If input <> "" Then section += "\n\nInput:\n```\n" + input + "\n```"
+                        Dim output As String = args.Value("output").AsString().Or("")
+                        If output <> "" Then section += "\n\nOutput:\n```\n" + output + "\n```"
+                        lastKind = "tool"
+                    Case "showProposal"
+                        Dim title As String = args.Value("title").AsString().Or("")
+                        section = "### Proposed changes" + If(title = "", "", ": " + title)
+                        lastKind = "card"
+                        Dim changes As JSONItem = args.Value("files")
+                        If changes <> Nil And changes.IsArray() Then
+                            For i As Integer = 0 To changes.Count - 1
+                                Dim change As JSONItem = changes.ValueAt(i)
+                                section += "\n\n" + change.Value("path").AsString().Or("") + "\n```diff\n" + change.Value("diff").AsString().Or("") + "\n```"
+                            Next
+                        End If
+                        Dim outcome As String = outcomes.Get(args.Value("id").AsString().Or("")).Or("")
+                        If outcome <> "" Then section += "\n\nOutcome: " + outcome
+                    Case "showPermission"
+                        section = "### Permission requested: " + args.Value("title").AsString().Or("")
+                        lastKind = "card"
+                        Dim details As String = args.Value("details").AsString().Or("")
+                        If details <> "" Then section += "\n\n" + details
+                        Dim outcome As String = outcomes.Get(args.Value("id").AsString().Or("")).Or("")
+                        If outcome <> "" Then section += "\n\nOutcome: " + outcome
+                End Select
+                If section <> "" Then
+                    If out <> "" Then out += "\n\n"
+                    out += section
+                End If
+            Next
+            If out = "" Then Return Me.mTranscript
+            Return out + "\n"
+        End Get
+    End Property
+
+    ' Read-only native frames for layout diagnostics; no conversation data is exposed.
+    Public Function LayoutFrames() As Array Of JSONItem
+        Return [FrameRecord("heading", Me.mHeading), FrameRecord("auth", Me.mAuth), FrameRecord("provider", Me.mProvider), FrameRecord("model", Me.mModel), FrameRecord("context", Me.mContextLabel), FrameRecord("copyTranscript", Me.mCopyAll), FrameRecord("viewMode", Me.mViewMode), FrameRecord("transcript", Me.mTranscriptArea), ViewFrameRecord("transcriptView"), FrameRecord("activity", Me.mActivity), FrameRecord("proposal", Me.mProposal), FrameRecord("attachments", Me.mAttachmentsLabel), FrameRecord("composer", Me.mComposer), FrameRecord("attach", Me.mAttach), FrameRecord("send", Me.mSend), FrameRecord("cancel", Me.mCancel), FrameRecord("approve", Me.mApprove), FrameRecord("reject", Me.mReject), FrameRecord("status", Me.mStatus)]
+    End Function
+
+    Private Function ViewFrameRecord(name As String) As JSONItem
+        If Me.mTranscriptView <> Nil Then Return FrameRecord(name, Me.mTranscriptView)
+        Dim value As JSONItem = JSONItem.NewObject()
+        value.Value("name") = JSONItem.From(name)
+        value.Value("x") = JSONItem.From(0)
+        value.Value("y") = JSONItem.From(0)
+        value.Value("width") = JSONItem.From(0)
+        value.Value("height") = JSONItem.From(0)
+        value.Value("visible") = JSONItem.From(False)
+        Return value
+    End Function
+
+    Private Function FrameRecord(name As String, widget As UIControl) As JSONItem
+        Dim value As JSONItem = JSONItem.NewObject()
+        value.Value("name") = JSONItem.From(name)
+        value.Value("x") = JSONItem.From(widget.X)
+        value.Value("y") = JSONItem.From(widget.Y)
+        value.Value("width") = JSONItem.From(widget.Width)
+        value.Value("height") = JSONItem.From(widget.Height)
+        value.Value("visible") = JSONItem.From(widget.Visible)
+        Return value
+    End Function
+
+    ''' Invoke after resizing the surrounding View. Minimum usable panel is 240 by 320.
+    ''' In rich mode tool activity and proposal/permission cards render inline in the
+    ''' transcript; the plain fallback gives them native areas while they have content.
+    Public Sub LayoutPanel(width As Integer, height As Integer)
+        Dim w As Integer = Math.Max(width, 240)
+        Dim h As Integer = Math.Max(height, 320)
+        Me.mWidth = width
+        Me.mHeight = height
+        Dim rich As Boolean = Me.mRichState <> 2
+        Dim inlineCards As Boolean = Me.mRichState = 1
+        Dim authWidth As Integer = Math.Min(176, w - 80)
+        If Me.mAuth.Caption = "Sign out" Then authWidth = Math.Min(96, authWidth)
+        Dim headingWidth As Integer = w
+        If Me.mAuth.Visible Then headingWidth = Math.Max(60, w - authWidth - 8)
+        Me.mHeading.Move(0, 4, headingWidth, 20)
+        Me.mAuth.Move(w - authWidth, 0, authWidth, 26)
+        Dim modelHeight As Integer = 0
+        If Me.mModel.Visible And h < 420 Then
+            ' Compact panels: provider and model share one row so the transcript keeps room.
+            Dim half As Integer = (w - 6) \ 2
+            Me.mProvider.Move(0, 34, half, 26)
+            Me.mModel.Move(w - half, 34, half, 26)
+        Else
+            Me.mProvider.Move(0, 34, w, 26)
+            If Me.mModel.Visible Then modelHeight = 32
+            Me.mModel.Move(0, 66, w, 26)
+        End If
+        ' Transcript toolbar shares the context row (no extra height at the minimum size):
+        ' copy the whole chat and switch web/native rendering.
+        Dim toolY As Integer = 63 + modelHeight
+        Dim toolWidth As Integer = Math.Min(92, (w - 48) \ 2)
+        Me.mViewMode.Move(w - toolWidth, toolY, toolWidth, 24)
+        Me.mCopyAll.Move(w - 2 * toolWidth - 6, toolY, toolWidth, 24)
+        Me.mContextLabel.Move(0, 67 + modelHeight, Math.Max(24, w - 2 * toolWidth - 12), 16)
+        Dim bottom As Integer = h - 18
+        Me.mStatus.Move(0, bottom + 2, w, 16)
+        bottom -= 34
+        Me.mSend.Move(w - 80, bottom, 80, 28)
+        Me.mCancel.Move(w - 168, bottom, 80, 28)
+        Me.mAttach.Move(0, bottom, Math.Min(88, Math.Max(40, w - 176)), 28)
+        Dim composerHeight As Integer = 64
+        Dim cardHeight As Integer = 96
+        Dim activityHeight As Integer = 44
+        If h < 520 Then
+            composerHeight = 56
+            cardHeight = 64
+            activityHeight = 32
+        End If
+        If h < 420 Then
+            composerHeight = 40
+            cardHeight = 32
+            activityHeight = 20
+        End If
+        bottom -= composerHeight + 8
+        Me.mComposer.Move(0, bottom, w, composerHeight)
+        If Me.mAttachmentsLabel.Visible Then
+            bottom -= 26
+            Me.mAttachmentsLabel.Move(0, bottom + 4, Math.Max(40, w - 64), 16)
+            Me.mClearAttachments.Move(w - 60, bottom, 60, 22)
+        End If
+        ' The transcript keeps at least 16 px: the fallback card shrinks and the activity
+        ' box is dropped before anything could overlap at the 240 x 320 minimum.
+        Dim top As Integer = 90 + modelHeight
+        Dim showCard As Boolean = (Me.mPermission Or Me.mProposalId <> "")
+        Me.mProposal.Visible = showCard And Not inlineCards
+        Me.mApprove.Visible = showCard And Not inlineCards And (Not Me.mPermission Or Me.mPermissionCanAccept)
+        Me.mReject.Visible = showCard And Not inlineCards
+        If showCard And Not inlineCards Then
+            cardHeight = Math.Max(16, Math.Min(cardHeight, bottom - 36 - 8 - 8 - 16 - top))
+            bottom -= 36
+            Me.mApprove.Move(0, bottom, 136, 28)
+            Dim rejectLeft As Integer = 144
+            If Me.mPermission And Not Me.mPermissionCanAccept Then rejectLeft = 0
+            Me.mReject.Move(rejectLeft, bottom, 84, 28)
+            bottom -= cardHeight + 8
+            Me.mProposal.Move(0, bottom, w, cardHeight)
+        End If
+        Dim showActivity As Boolean = Array.Count(Me.mToolOrder) > 0 And Not rich And bottom - activityHeight - 8 - 8 - top >= 16
+        Me.mActivity.Visible = showActivity
+        If showActivity Then
+            bottom -= activityHeight + 8
+            Me.mActivity.Move(0, bottom, w, activityHeight)
+        End If
+        Dim transcriptHeight As Integer = Math.Max(16, bottom - 8 - top)
+        Me.mTranscriptArea.Move(0, top, w, transcriptHeight)
+        If Me.mTranscriptView <> Nil Then Me.mTranscriptView.Move(0, top, w, transcriptHeight)
+    End Sub
+End Class
+
+' <generated:transcript-html> Produced by tools/gen_transcript_asset.py from web/. Do not edit by hand.
+''' The bundled transcript document (Svelte build, single file, no network).
+Public Function ChatTranscriptHTML() As String
+    Dim s As String = ""
+    s += "<!doctype html>\n"
+    s += "<html lang=\"en\">\n"
+    s += "  <head>\n"
+    s += "    <meta charset=\"utf-8\" />\n"
+    s += "    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />\n"
+    s += "    <meta name=\"color-scheme\" content=\"light dark\" />\n"
+    s += "    <title>Agent transcript</title>\n"
+    s += "    <script type=\"module\" crossorigin>var Ki=Object.defineProperty;var ls=e=>{throw TypeError(e)};var Zi=(e,t,n)=>t in e?Ki(e,t,{enumerable:!0,configurable:!0,writable:!0,value:n}):e[t]=n;var de=(e,t,n)=>Zi(e,typeof t!=\"symbol\"?t+\"\":t,n),sr=(e,t,n)=>t.has(e)||ls(\"Cannot \"+n);var f=(e,t,n)=>(sr(e,t,\"read from private field\"),n?n.call(e):t.get(e)),z=(e,t,n)=>t.has(e)?ls"
+    s += "(\"Cannot add the same private member more than once\"):t instanceof WeakSet?t.add(e):t.set(e,n),F=(e,t,n,r)=>(sr(e,t,\"write to private field\"),r?r.call(e,n):t.set(e,n),n),O=(e,t,n)=>(sr(e,t,\"access private method\"),n);const Ji=(function(){const t=typeof document<\"u\"&&document.createElement(\"link\").relList;return t&&t.supports&&t.supports(\"modulepreload\")?\"moduleprel"
+    s += "oad\":\"preload\"})(),Xi=function(e,t){return new URL(e,t).href},us={},Qi=function(t,n,r){let s=Promise.resolve();if(n&&n.length>0){let u=function(c){return Promise.all(c.map(v=>Promise.resolve(v).then(_=>({status:\"fulfilled\",value:_}),_=>({status:\"rejected\",reason:_}))))};const a=document.getElementsByTagName(\"link\"),l=document.querySelector(\"meta[property=csp-nonce]\")"
+    s += ",o=l?.nonce||l?.getAttribute(\"nonce\");s=u(n.map(c=>{if(c=Xi(c,r),c in us)return;us[c]=!0;const v=c.endsWith(\".css\"),_=v?'[rel=\"stylesheet\"]':\"\";if(r)for(let p=a.length-1;p>=0;p--){const b=a[p];if(b.href===c&&(!v||b.rel===\"stylesheet\"))return}else if(document.querySelector(`link[href=\"${c}\"]${_}`))return;const d=document.createElement(\"link\");if(d.rel=v?\"styleshee"
+    s += "t\":Ji,v||(d.as=\"script\"),d.crossOrigin=\"\",d.href=c,o&&d.setAttribute(\"nonce\",o),document.head.appendChild(d),v)return new Promise((p,b)=>{d.addEventListener(\"load\",p),d.addEventListener(\"error\",()=>b(new Error(`Unable to preload CSS for ${c}`)))})}))}function i(a){const l=new Event(\"vite:preloadError\",{cancelable:!0});if(l.payload=a,window.dispatchEvent(l),!l.defau"
+    s += "ltPrevented)throw a}return s.then(a=>{for(const l of a||[])l.status===\"rejected\"&&i(l.reason);return t().catch(i)})},Ps=!1;var Rs=Array.isArray,$i=Array.prototype.indexOf,kn=Array.prototype.includes,er=Array.from,Ns=Object.defineProperty,bn=Object.getOwnPropertyDescriptor,Is=Object.getOwnPropertyDescriptors,ea=Object.prototype,ta=Array.prototype,zr=Object.getPrototypeOf,cs=Ob"
+    s += "ject.isExtensible;const Fs=()=>{};function na(e){return e()}function pr(e){for(var t=0;t<e.length;t++)e[t]()}function Ds(){var e,t,n=new Promise((r,s)=>{e=r,t=s});return{promise:n,resolve:e,reject:t}}const ge=2,en=4,Cn=8,Bs=1<<24,Ue=16,Ze=32,St=64,_r=128,Hr=256,Ge=512,ae=1024,te=2048,Re=4096,we=8192,_e=16384,ln=32768,xn=1<<25,tn=65536,Yn=1<<17,ra=1<<18,un=1<<19,Ws=1<<20,st=1<<2"
+    s += "5,Vn=1<<21,Vt=1<<22,xt=1<<23,Gt=Symbol(\"$state\"),zs=Symbol(\"component\"),sa=Symbol(\"\"),zn=Symbol(\"attributes\"),gr=Symbol(\"class\"),ia=Symbol(\"style\"),vn=Symbol(\"text\"),On=new class extends Error{constructor(){super(...arguments);de(this,\"name\",\"StaleReactionError\");de(this,\"message\",\"The reaction that called `getAbortSignal()` was re-run or destroyed\")}},aa="
+    s += "1,oa=2,Hs=4,la=8,ua=16,qs=1,ca=2,Us={},ie=Symbol(\"uninitialized\"),Ys=\"http://www.w3.org/1999/xhtml\",fa=\"http://www.w3.org/2000/svg\",da=\"http://www.w3.org/1998/Math/MathML\";function va(){console.warn(\"https://svelte.dev/e/derived_inert\")}function ha(){console.warn(\"https://svelte.dev/e/svelte_boundary_reset_noop\")}function Vs(e){return e===this.v}function pa(e,t){ret"
+    s += "urn e!=e?t==t:e!==t||e!==null&&typeof e==\"object\"||typeof e==\"function\"}function Gs(e){return!pa(e,this.v)}function _a(e){throw new Error(\"https://svelte.dev/e/lifecycle_outside_component\")}function ga(){throw new Error(\"https://svelte.dev/e/async_derived_orphan\")}function ma(e,t,n){throw new Error(\"https://svelte.dev/e/each_key_duplicate\")}function ba(e){throw new Er"
+    s += "ror(\"https://svelte.dev/e/effect_in_teardown\")}function wa(){throw new Error(\"https://svelte.dev/e/effect_in_unowned_derived\")}function ya(e){throw new Error(\"https://svelte.dev/e/effect_orphan\")}function ka(){throw new Error(\"https://svelte.dev/e/effect_update_depth_exceeded\")}function xa(){throw new Error(\"https://svelte.dev/e/state_descriptors_fixed\")}function Sa()"
+    s += "{throw new Error(\"https://svelte.dev/e/state_prototype_fixed\")}function Ea(){throw new Error(\"https://svelte.dev/e/state_unsafe_mutation\")}function Aa(){throw new Error(\"https://svelte.dev/e/svelte_boundary_reset_onerror\")}let Ln=!1,Ma=!1;function Ta(){Ln=!0}let re=null;function nn(e){re=e}function Xe(e,t=!1,n){re={p:re,i:!1,c:null,e:null,s:e,x:null,r:V,l:Ln&&!t?{s:null,u"
+    s += ":null,$:[]}:null}}function Qe(e){var t=re,n=t.e;if(n!==null){t.e=null;for(var r of n)_i(r)}return t.i=!0,re=t.p,qr(e)}function qr(e={}){return Ns(e,zs,{value:!0}),e}function jn(){return!Ln||re!==null&&re.l===null}let Yt=[];function Ca(){var e=Yt;Yt=[],pr(e)}function ht(e){if(Yt.length===0){var t=Yt;queueMicrotask(()=>{t===Yt&&Ca()})}Yt.push(e)}const Oa=-7169;function se(e,t){e."
+    s += "f=e.f&Oa|t}function Ur(e){(e.f&Ge)!==0||e.deps===null?se(e,ae):se(e,Re)}function Ks(e,t){(e.f&te)!==0?t.set(e,te):(e.f&Re)!==0&&t.get(e)!==te&&t.set(e,Re),se(e,ae)}function Pn(e){var t=D,n=V;We(null),at(null);try{return e()}finally{We(t),at(n)}}function La(e,t,n,r){const s=jn()?tr:Js;var i=e.filter(d=>!d.settled),a=t.map(s);if(n.length===0&&i.length===0){r(a);return}var l=V,o=j"
+    s += "a(),u=i.length===1?i[0].promise:i.length>1?Promise.all(i.map(d=>d.promise)):null;function c(d){if((l.f&_e)===0){o();try{r([...a,...d])}catch(p){rt(p,l)}Gn()}}var v=Zs();if(n.length===0){u.then(()=>c([])).finally(v);return}function _(){Promise.all(n.map(d=>Pa(d))).then(c).catch(d=>rt(d,l)).finally(v)}u?u.then(()=>{if((l.f&_e)!==0){v();return}o(),_(),Gn()}):_()}function ja(){var "
+    s += "e=V,t=D,n=re,r=G;return function(i=!0){at(e),We(t),nn(n),i&&(e.f&_e)===0&&(r?.activate(),r?.apply())}}function Gn(e=!0){at(null),We(null),nn(null),e&&G?.deactivate()}function Zs(){var e=V,t=e.b,n=G,r=!!t?.is_rendered();return t?.update_pending_count(1,n),n.increment(r,e),()=>{t?.update_pending_count(-1,n),n.decrement(r,e)}}function tr(e){var t=ge|te;return V!==null&&(V.f|=un),{"
+    s += "ctx:re,deps:null,effects:null,equals:Vs,f:t,fn:e,reactions:null,rv:0,v:ie,wv:0,parent:V,ac:null}}const hn=Symbol(\"obsolete\");function Pa(e,t,n){let r=V;r===null&&ga();var s=void 0,i=Wt(ie),a=!D,l=new Set;return Ga(()=>{var o=V,u=Ds();s=u.promise;try{Promise.resolve(e()).then(u.resolve,d=>{d!==On&&u.reject(d)}).finally(Gn)}catch(d){u.reject(d),Gn()}var c=G;if(a){if((o.f&ln)!=="
+    s += "0)var v=Zs();if(r.b?.is_rendered())c.async_deriveds.get(o)?.reject(hn);else for(const d of l.values())d.reject(hn);l.add(u),c.async_deriveds.set(o,u)}const _=(d,p=void 0)=>{v?.(),l.delete(u),p!==hn&&(c.activate(),p?(i.f|=xt,rn(i,p)):((i.f&xt)!==0&&(i.f^=xt),rn(i,d)),c.deactivate())};u.promise.then(_,d=>_(null,d||\"unknown\"))}),pi(()=>{for(const o of l)o.reject(hn)}),new Promis"
+    s += "e(o=>{function u(c){function v(){c===s?o(i):u(s)}c.then(v,v)}u(s)})}function ne(e){const t=tr(e);return Si(t),t}function Js(e){const t=tr(e);return t.equals=Gs,t}function Ra(e){var t=e.effects;if(t!==null){e.effects=null;for(var n=0;n<t.length;n+=1)Se(t[n])}}function Yr(e){var t,n=V,r=e.parent;if(!Et&&r!==null&&e.v!==ie&&(r.f&(_e|we))!==0)return va(),e.v;at(r);try{Ra(e),t=Ti(e)"
+    s += "}finally{at(n)}return t}function Xs(e){var t=Yr(e);if(!e.equals(t)&&(e.wv=Ai(),(!G?.is_fork||e.deps===null)&&(G!==null?(G.capture(e,t,!0),mr?.capture(e,t,!0)):e.v=t,e.deps===null))){se(e,ae);return}Et||(Ye!==null?(Kr()||G?.is_fork)&&Ye.set(e,t):Ur(e))}function Na(e){if(e.effects!==null)for(const t of e.effects)(t.teardown||t.ac)&&(t.teardown?.(),t.ac!==null&&Pn(()=>{t.ac.abort("
+    s += "On),t.ac=null}),t.fn!==null&&(t.teardown=Fs),Sn(t,0),Jr(t))}function Qs(e){if(e.effects!==null)for(const t of e.effects)t.teardown&&t.fn!==null&&sn(t)}let ir=null,Ht=null,G=null,mr=null,Ye=null,br=null,ar=!1,wn=null,Hn=null;var fs=0;let Ia=1;var Kt,Zt,Jt,ft,Xt,dt,En,$e,et,Qt,jt,H,wr,$s,yr,pn,kr,ei,ti,ni,Ut,Fa,_n;const Xn=class Xn{constructor(){z(this,H);de(this,\"id\",Ia++);de("
+    s += "this,\"started\",!1);de(this,\"linked\",!0);de(this,\"prev\",null);de(this,\"next\",null);de(this,\"async_deriveds\",new Map);de(this,\"current\",new Map);de(this,\"previous\",new Map);z(this,Kt,new Set);z(this,Zt,new Set);z(this,Jt,0);z(this,ft,new Map);z(this,Xt,null);z(this,dt,[]);z(this,En,[]);z(this,$e,new Map);z(this,et,new Map);z(this,Qt,new Set);de(this,\"is_fork\",!1);"
+    s += "z(this,jt,!1);Ht===null?ir=Ht=this:(Ht.next=this,this.prev=Ht),Ht=this}skip_effect(t){f(this,et).has(t)||f(this,et).set(t,{d:[],m:[]}),f(this,Qt).delete(t)}unskip_effect(t,n=r=>this.schedule(r)){var r=f(this,et).get(t);if(r){f(this,et).delete(t);for(var s of r.d)se(s,te),n(s);for(s of r.m)se(s,Re),n(s)}f(this,Qt).add(t)}capture(t,n,r=!1){t.v!==ie&&!this.previous.has(t)&&this.pr"
+    s += "evious.set(t,t.v),(t.f&xt)===0&&(this.current.set(t,[n,r]),Ye?.set(t,n)),this.is_fork||(t.v=n)}activate(){G=this}deactivate(){G=null,Ye=null}flush(){try{ar=!0,G=this,O(this,H,pn).call(this)}finally{fs=0,br=null,wn=null,Hn=null,ar=!1,G=null,Ye=null,it.clear()}}discard(){for(const t of f(this,Zt))t(this);f(this,Zt).clear();for(const t of this.async_deriveds.values())t.reject(hn);"
+    s += "O(this,H,_n).call(this),f(this,Xt)?.resolve()}register_created_effect(t){f(this,En).push(t)}increment(t,n){if(F(this,Jt,f(this,Jt)+1),t){let r=f(this,ft).get(n)??0;f(this,ft).set(n,r+1)}}decrement(t,n){if(F(this,Jt,f(this,Jt)-1),t){let r=f(this,ft).get(n)??0;r===1?f(this,ft).delete(n):f(this,ft).set(n,r-1)}f(this,jt)||(F(this,jt,!0),ht(()=>{F(this,jt,!1),this.linked&&this.flush"
+    s += "()}))}transfer_reactions(t){for(const[n,r]of t)this.add_dirty_reaction(n,r);t.clear()}add_dirty_reaction(t,n){(n===te||f(this,$e).get(t)!==te)&&f(this,$e).set(t,n)}oncommit(t){f(this,Kt).add(t)}ondiscard(t){f(this,Zt).add(t)}settled(){return(f(this,Xt)??F(this,Xt,Ds())).promise}static ensure(){if(G===null){const t=G=new Xn;ar||ht(()=>{t.started||t.flush()})}return G}apply(){{Ye"
+    s += "=null;return}}schedule(t){if(br=t,t.b?.is_pending&&(t.f&(en|Cn|Bs))!==0&&(t.f&ln)===0){t.b.defer_effect(t);return}f(this,dt).push(t)}};Kt=new WeakMap,Zt=new WeakMap,Jt=new WeakMap,ft=new WeakMap,Xt=new WeakMap,dt=new WeakMap,En=new WeakMap,$e=new WeakMap,et=new WeakMap,Qt=new WeakMap,jt=new WeakMap,H=new WeakSet,wr=function(){if(this.is_fork)return!0;for(const t of f(this,ft).k"
+    s += "eys())if(!O(this,H,$s).call(this,t))return!0;return!1},$s=function(t){for(var n=t;n!==null;n=n.parent)if(f(this,et).has(n))return!0;return!1},yr=function(){var t=[];for(const i of f(this,dt))if(!((i.f&_e)!==0||(i.f&(te|Re))===0)){for(var n=i,r=!1;n.parent!==null;){n=n.parent;var s=n.f;if((s&(St|Ze))!==0){if((s&ae)===0){r=!0;break}n.f^=ae}}r||t.push(n)}return F(this,dt,[]),t},pn"
+    s += "=function(){var l,o,u;this.started=!0;for(const[c,v]of f(this,$e))se(c,v),this.schedule(c);this.apply();for(var t=wn=[],n=[],r=Hn=[];f(this,dt).length>0;){fs++>1e3&&(O(this,H,_n).call(this),Da());for(const c of O(this,H,yr).call(this))try{O(this,H,kr).call(this,c,t,n)}catch(v){throw ii(c),O(this,H,wr).call(this)||this.discard(),v}}if(G=null,r.length>0){var s=Xn.ensure();for(con"
+    s += "st c of r)s.schedule(c)}if(wn=null,Hn=null,O(this,H,wr).call(this)){O(this,H,Ut).call(this,n),O(this,H,Ut).call(this,t);for(const[c,v]of f(this,et))si(c,v);r.length>0&&O(l=G,H,pn).call(l);return}const i=O(this,H,ei).call(this);if(i){O(this,H,Ut).call(this,n),O(this,H,Ut).call(this,t),O(o=i,H,ni).call(o,this);return}f(this,$e).clear();for(const c of f(this,Kt))c(this);f(this,Kt)"
+    s += ".clear(),mr=this,ds(n),ds(t),mr=null,f(this,Xt)?.resolve();var a=G;f(this,Jt)===0&&(f(this,dt).length===0||a!==null)&&O(this,H,_n).call(this),a!==null&&(it.clear(),O(u=a,H,pn).call(u))},kr=function(t,n,r){t.f^=ae;for(var s=t.first;s!==null;){var i=s.f,a=(i&(Ze|St))!==0,l=a&&(i&ae)!==0,o=l||(i&we)!==0||f(this,et).has(s);if(!o&&s.fn!==null){a?s.f^=ae:(i&en)!==0?n.push(s):Nn(s)&&("
+    s += "(i&Ue)!==0&&this.add_dirty_reaction(s,Re),sn(s));var u=s.first;if(u!==null){s=u;continue}}for(;s!==null;){var c=s.next;if(c!==null){s=c;break}s=s.parent}}},ei=function(){for(var t=this.prev;t!==null;t=t.prev)if(!t.is_fork&&O(this,H,ti).call(this,t))return t;return null},ti=function(t){for(const[n,[,r]]of this.current)if(!r&&t.current.has(n))return!0;return!1},ni=function(t){var"
+    s += " r;for(const[s,i]of t.current)!this.previous.has(s)&&t.previous.has(s)&&this.previous.set(s,t.previous.get(s)),this.current.set(s,i);for(const[s,i]of t.async_deriveds){const a=this.async_deriveds.get(s);a&&i.promise.then(a.resolve).catch(a.reject)}t.async_deriveds.clear(),this.transfer_reactions(f(t,$e));const n=s=>{var i=s.reactions;if(i!==null&&!((s.f&ge)!==0&&(s.f&(te|Re))=="
+    s += "=0))for(const o of i){var a=o.f;if((a&ge)!==0)n(o);else{var l=o;a&(Vt|Ue)&&!this.async_deriveds.has(l)&&(f(this,$e).delete(l),se(l,te),this.schedule(l))}}};for(const s of this.current.keys())n(s);this.oncommit(()=>t.discard()),O(r=t,H,_n).call(r),G=this,O(this,H,pn).call(this)},Ut=function(t){for(var n=0;n<t.length;n+=1)Ks(t[n],f(this,$e))},Fa=function(){var v,_;for(let d=ir;d!"
+    s += "==null;d=d.next){var t=d.id<this.id,n=[];for(const[p,[b,g]]of this.current){if(d.current.has(p)){var r=d.current.get(p)[0];if(t&&b!==r)d.current.set(p,[b,g]);else continue}n.push(p)}if(t)for(const[p,b]of this.async_deriveds){const g=d.async_deriveds.get(p);g&&b.promise.then(g.resolve).catch(g.reject)}var s=[...d.current.keys()].filter(p=>!d.current.get(p)[1]);if(!(!d.started||s"
+    s += ".length===0)){var i=s.filter(p=>!this.current.has(p));if(i.length===0)t&&d.discard();else if(n.length>0){if(t)for(const p of f(this,Qt))d.unskip_effect(p,b=>{var g;(b.f&(Ue|Vt))!==0?d.schedule(b):O(g=d,H,Ut).call(g,[b])});d.activate();var a=new Set,l=new Map;for(var o of n)ri(o,i,a,l);l=new Map;var u=[...d.current].filter(([p,b])=>{const g=this.current.get(p);return g?g[0]!==b["
+    s += "0]||g[1]!==b[1]:!0}).map(([p])=>p);if(u.length>0)for(const p of f(this,En))(p.f&(_e|we|Yn))===0&&Vr(p,u,l)&&((p.f&(Vt|Ue))!==0?(se(p,te),d.schedule(p)):d.add_dirty_reaction(p,te));if(f(d,dt).length>0&&!f(d,jt)){d.apply();for(var c of O(v=d,H,yr).call(v))O(_=d,H,kr).call(_,c,[],[])}d.deactivate()}}}},_n=function(){if(this.linked){var t=this.prev,n=this.next;t===null?ir=n:t.next="
+    s += "n,n===null?Ht=t:n.prev=t,this.linked=!1}};let Bt=Xn;function Da(){try{ka()}catch(e){rt(e,br)}}let ct=null;function ds(e){var t=e.length;if(t!==0){for(var n=0;n<t;){var r=e[n++];if((r.f&(_e|we))===0&&Nn(r)&&(ct=new Set,sn(r),r.deps===null&&r.first===null&&r.nodes===null&&r.teardown===null&&r.ac===null&&yi(r),ct?.size>0)){it.clear();for(const s of ct){if((s.f&(_e|we))!==0)continu"
+    s += "e;const i=[s];let a=s.parent;for(;a!==null;)ct.has(a)&&(ct.delete(a),i.push(a)),a=a.parent;for(let l=i.length-1;l>=0;l--){const o=i[l];(o.f&(_e|we))===0&&sn(o)}}ct.clear()}}ct=null}}function ri(e,t,n,r){if(!n.has(e)&&(n.add(e),e.reactions!==null))for(const s of e.reactions){const i=s.f;(i&ge)!==0?ri(s,t,n,r):(i&(Vt|Ue))!==0&&(i&te)===0&&Vr(s,t,r)&&(se(s,te),Gr(s))}}function Vr("
+    s += "e,t,n){const r=n.get(e);if(r!==void 0)return r;if(e.deps!==null)for(const s of e.deps){if(kn.call(t,s))return!0;if((s.f&ge)!==0&&Vr(s,t,n))return n.set(s,!0),!0}return n.set(e,!1),!1}function Gr(e){G.schedule(e)}function si(e,t){if(!((e.f&Ze)!==0&&(e.f&ae)!==0)){(e.f&te)!==0?t.d.push(e):(e.f&Re)!==0&&t.m.push(e),se(e,ae);for(var n=e.first;n!==null;)si(n,t),n=n.next}}function ii"
+    s += "(e){se(e,ae);for(var t=e.first;t!==null;)ii(t),t=t.next}let Kn=new Set;const it=new Map;let ai=!1;function Wt(e,t){var n={f:0,v:e,reactions:null,equals:Vs,rv:0,wv:0};return n}function Le(e,t){const n=Wt(e);return Si(n),n}function Ba(e,t=!1,n=!0){var s;const r=Wt(e);return t||(r.equals=Gs),Ln&&n&&re!==null&&re.l!==null&&((s=re.l).s??(s.s=[])).push(r),r}function he(e,t,n=!1){D!=="
+    s += "null&&(!Ve||(D.f&Yn)!==0)&&jn()&&(D.f&(ge|Ue|Vt|Yn))!==0&&(Ke===null||!Ke.has(e))&&Ea();let r=n?kt(t):t;return rn(e,r,Hn)}var Ct=null,xr=0;function rn(e,t,n=null){if(!e.equals(t)){Et?it.set(e,t):it.has(e)||it.set(e,e.v);var r=Bt.ensure();if(r.capture(e,t),(e.f&ge)!==0){const s=e;(e.f&te)!==0&&Yr(s),Ye===null&&Ur(s)}e.wv=Ai(),Ct=null,xr=0,oi(e,te,n),Ct=null,jn()&&V!==null&&(V.f&"
+    s += "ae)!==0&&(V.f&(Ze|St))===0&&(Ie===null?Za([e]):Ie.push(e)),!r.is_fork&&Kn.size>0&&!ai&&Wa()}return t}function Wa(){ai=!1;for(const e of Kn){(e.f&ae)!==0&&se(e,Re);let t;try{t=Nn(e)}catch{t=!0}t&&sn(e)}Kn.clear()}function yn(e){he(e,e.v+1)}function oi(e,t,n){var r=e.reactions;if(r!==null){var s=jn(),i=r.length;if(xr+=i,xr>1e5&&Ct===null&&(Ct=new Set),Ct!==null){if(Ct.has(e))retu"
+    s += "rn;Ct.add(e)}for(var a=0;a<i;a++){var l=r[a],o=l.f;if(!(!s&&l===V)){var u=(o&te)===0;if(u&&se(l,t),(o&Yn)!==0)Kn.add(l);else if((o&ge)!==0){var c=l;Ye?.delete(c),oi(c,Re,n)}else if(u){var v=l;(o&Ue)!==0&&ct!==null&&ct.add(v),n!==null?n.push(v):Gr(v)}}}}}function kt(e){if(typeof e!=\"object\"||e===null||Gt in e||zs in e)return e;const t=zr(e);if(t!==ea&&t!==ta)return e;var n=new"
+    s += " Map,r=Rs(e),s=Le(0),i=Ft,a=l=>{if(Ft===i)return l();var o=D,u=Ft;We(null),hs(i);var c=l();return We(o),hs(u),c};return r&&n.set(\"length\",Le(e.length)),new Proxy(e,{defineProperty(l,o,u){(!(\"value\"in u)||u.configurable===!1||u.enumerable===!1||u.writable===!1)&&xa();var c=n.get(o);return c===void 0?a(()=>{var v=Le(u.value);return n.set(o,v),v}):he(c,u.value,!0),!0},deletePr"
+    s += "operty(l,o){var u=n.get(o);if(u===void 0){if(o in l){const c=a(()=>Le(ie));n.set(o,c),yn(s)}}else he(u,ie),yn(s);return!0},get(l,o,u){if(o===Gt)return e;var c=n.get(o),v=o in l;if(c===void 0&&(!v||bn(l,o)?.writable)&&(c=a(()=>{var d=kt(v?l[o]:ie),p=Le(d);return p}),n.set(o,c)),c!==void 0){var _=h(c);return _===ie?void 0:_}return Reflect.get(l,o,u)},getOwnPropertyDescriptor(l,o)"
+    s += "{this.has?.(l,o);var u=Reflect.getOwnPropertyDescriptor(l,o),c=n.get(o);if(c!==void 0){var v=h(c);if(v===ie)return;if(u&&\"value\"in u)u.value=v;else return{enumerable:!0,configurable:!0,value:v,writable:!0}}return u},has(l,o){if(o===Gt)return!0;var u=n.get(o),c=u!==void 0&&u.v!==ie||Reflect.has(l,o);if(u!==void 0||(V!==null||D!==null)&&(!c||bn(l,o)?.writable)){u===void 0&&(u=a"
+    s += "(()=>{var _=c?kt(l[o]):ie,d=Le(_);return d}),n.set(o,u));var v=h(u);if(v===ie)return!1}return c},set(l,o,u,c){var v=n.get(o),_=o in l;if(r&&o===\"length\")for(var d=u;d<v.v;d+=1){var p=n.get(d+\"\");p!==void 0?he(p,ie):d in l&&(p=a(()=>Le(ie)),n.set(d+\"\",p))}if(v===void 0)(!_||bn(l,o)?.writable)&&(v=a(()=>Le(void 0)),he(v,kt(u)),n.set(o,v));else{_=v.v!==ie;var b=a(()=>kt(u));"
+    s += "he(v,b)}var g=Reflect.getOwnPropertyDescriptor(l,o);if(g?.set&&g.set.call(c,u),!_){if(r&&typeof o==\"string\"){var y=n.get(\"length\"),m=Number(o);Number.isInteger(m)&&m>=y.v&&he(y,m+1)}yn(s)}return!0},ownKeys(l){h(s);var o=Reflect.ownKeys(l).filter(v=>{var _=n.get(v);return _===void 0||_.v!==ie});for(var[u,c]of n)c.v!==ie&&!(u in l)&&o.push(u);return o},setPrototypeOf(){Sa()}}"
+    s += ")}var Sr,li,ui,ci,fi;function za(){if(Sr===void 0){Sr=window,li=document,ui=/Firefox/.test(navigator.userAgent);var e=Element.prototype,t=Node.prototype,n=Text.prototype;ci=bn(t,\"firstChild\").get,fi=bn(t,\"nextSibling\").get,cs(e)&&(e[gr]=void 0,e[zn]=null,e[ia]=void 0,e.__e=void 0),cs(n)&&(n[vn]=void 0)}}function _t(e=\"\"){return document.createTextNode(e)}function ke(e){re"
+    s += "turn ci.call(e)}function Rn(e){return fi.call(e)}function E(e,t){return ke(e)}function Je(e,t=!1){{var n=ke(e);return n instanceof Comment&&n.data===\"\"?Rn(n):n}}function U(e,t=!1){return ke(e)}function x(e,t=1,n=!1){let r=e;for(;t--;)r=Rn(r);return r}function Ha(e){e.textContent=\"\"}function di(){return!1}function vi(e,t,n){return t==null||t===Ys?n?document.createElement(e,{"
+    s += "is:n}):document.createElement(e):n?document.createElementNS(t,e,{is:n}):document.createElementNS(t,e)}function qa(e){var t=V;if(t===null)return D.f|=xt,e;if((t.f&ln)===0&&(t.f&en)===0)throw e;rt(e,t)}function rt(e,t){if(e===Us)throw e;if(!(t!==null&&(t.f&_e)!==0)){for(;t!==null;){if((t.f&_r)!==0&&(t.f&(_e|xn))===0){if((t.f&ln)===0)throw e;try{t.b.error(e);return}catch(n){e=n}}t"
+    s += "=t.parent}throw e}}function hi(e){V===null&&(D===null&&ya(),wa()),Et&&ba()}function Ua(e,t){var n=t.last;n===null?t.last=t.first=e:(n.next=e,e.prev=n,t.last=e)}function ot(e,t){var n=V;n!==null&&(n.f&we)!==0&&(e|=we);var r={ctx:re,deps:null,nodes:null,f:e|te|Ge,first:null,fn:t,last:null,next:null,parent:n,b:n&&n.b,prev:null,teardown:null,wv:0,ac:null};G?.register_created_effect"
+    s += "(r);var s=r;if((e&en)!==0)wn!==null?wn.push(r):Bt.ensure().schedule(r);else if(t!==null){try{sn(r)}catch(a){throw Se(r),a}s.deps===null&&s.teardown===null&&s.nodes===null&&s.first===s.last&&(s.f&un)===0&&(s=s.first,(e&Ue)!==0&&(e&tn)!==0&&s!==null&&(s.f|=tn))}if(s!==null&&(s.parent=n,n!==null&&Ua(s,n),D!==null&&(D.f&ge)!==0&&(e&St)===0)){var i=D;(i.effects??(i.effects=[])).push"
+    s += "(s)}return r}function Kr(){return D!==null&&!Ve}function pi(e){const t=ot(Cn,null);return se(t,ae),t.teardown=e,t}function Er(e){hi();var t=V.f,n=!D&&(t&Ze)!==0&&re!==null&&!re.i;if(n){var r=re;(r.e??(r.e=[])).push(e)}else return _i(e)}function _i(e){return ot(en|Ws,e)}function gi(e){return hi(),ot(Cn|Ws,e)}function Ya(e){Bt.ensure();const t=ot(St|un,e);return(n={})=>new Promis"
+    s += "e(r=>{n.outro?It(t,()=>{Se(t),r(void 0)}):(Se(t),r(void 0))})}function Va(e){return ot(en,e)}function Ga(e){return ot(Vt|un,e)}function mi(e,t=0){return ot(Cn|t,e)}function N(e,t=[],n=[],r=[]){La(r,t,n,s=>{ot(Cn,()=>{e(...s.map(h))})})}function Zr(e,t=0){var n=ot(Ue|t,e);return n}function Be(e){return ot(Ze|un,e)}function bi(e){var t=e.teardown;if(t!==null){const n=Et,r=D;vs(!0"
+    s += "),We(null);try{t.call(null)}catch(s){rt(s,e.parent)}finally{vs(n),We(r)}}}function Jr(e,t=!1){var n=e.first;for(e.first=e.last=null;n!==null;){const s=n.ac;s!==null&&Pn(()=>{s.abort(On)});var r=n.next;(n.f&St)!==0?n.parent=null:Se(n,t),n=r}}function Ka(e){for(var t=e.first;t!==null;){var n=t.next;(t.f&Ze)===0&&Se(t),t=n}}function Se(e,t=!0){var n=!1;(t||(e.f&ra)!==0)&&e.nodes!="
+    s += "=null&&e.nodes.end!==null&&(wi(e.nodes.start,e.nodes.end),n=!0),e.f|=xn,Jr(e,t&&!n),Sn(e,0);var r=e.nodes&&e.nodes.t;if(r!==null)for(const i of r)i.stop();bi(e),e.f^=xn,e.f|=_e;var s=e.parent;s!==null&&s.first!==null&&yi(e),e.next=e.prev=e.teardown=e.ctx=e.deps=e.fn=e.nodes=e.ac=e.b=null}function wi(e,t){for(;e!==null;){var n=e===t?null:Rn(e);e.remove(),e=n}}function yi(e){var "
+    s += "t=e.parent,n=e.prev,r=e.next;n!==null&&(n.next=r),r!==null&&(r.prev=n),t!==null&&(t.first===e&&(t.first=r),t.last===e&&(t.last=n))}function It(e,t,n=!0){var r=[];e.f|=Hr,ki(e,r,!0);var s=()=>{n&&Se(e),t&&t()},i=r.length;if(i>0){var a=()=>--i||s();for(var l of r)l.out(a)}else s()}function ki(e,t,n){if((e.f&we)===0){e.f^=we;var r=e.nodes&&e.nodes.t;if(r!==null)for(const l of r)(l"
+    s += ".is_global||n)&&t.push(l);for(var s=e.first;s!==null;){var i=s.next;if((s.f&St)===0){var a=(s.f&tn)!==0||(s.f&Ze)!==0&&(e.f&Ue)!==0;ki(s,t,a?n:!1)}s=i}}}function Zn(e){e.f&=~Hr,xi(e,!0)}function xi(e,t){if((e.f&Hr)===0&&(e.f&we)!==0){e.f^=we,(e.f&ae)===0&&(se(e,te),Bt.ensure().schedule(e));for(var n=e.first;n!==null;){var r=n.next,s=(n.f&tn)!==0||(n.f&Ze)!==0;xi(n,s?t:!1),n=r}v"
+    s += "ar i=e.nodes&&e.nodes.t;if(i!==null)for(const a of i)(a.is_global||t)&&a.in()}}function Xr(e,t){if(e.nodes)for(var n=e.nodes.start,r=e.nodes.end;n!==null;){var s=n===r?null:Rn(n);t.append(n),n=s}}let Et=!1;function vs(e){Et=e}let D=null,Ve=!1;function We(e){D=e}let V=null;function at(e){V=e}let Ke=null;function Si(e){D!==null&&((D.f&Vn)!==0||(D.f&ge)!==0)&&(Ke??(Ke=new Set)).ad"
+    s += "d(e)}let xe=null,je=0,Ie=null;function Za(e){Ie=e}let Ei=1,Ot=0,Ft=Ot;function hs(e){Ft=e}function Ai(){return++Ei}function Nn(e){var t=e.f;if((t&te)!==0)return!0;if((t&Re)!==0){for(var n=e.deps,r=n.length,s=0;s<r;s++){var i=n[s];if(Nn(i)&&Xs(i),i.wv>e.wv)return!0}(t&Ge)!==0&&Ye===null&&se(e,ae)}return!1}function Mi(e,t,n=!0){var r=e.reactions;if(r!==null&&!(Ke!==null&&Ke.has(e"
+    s += ")))for(var s=0;s<r.length;s++){var i=r[s];(i.f&ge)!==0?Mi(i,t,!1):t===i&&(n?se(i,te):(i.f&ae)!==0&&se(i,Re),Gr(i))}}function Ti(e){var t=xe,n=je,r=Ie,s=D,i=Ke,a=re,l=Ve,o=Ft,u=e.f;xe=null,je=0,Ie=null,D=(u&(Ze|St))===0?e:null,Ke=null,nn(e.ctx),Ve=!1,Ft=++Ot,e.ac!==null&&(Pn(()=>{e.ac.abort(On)}),e.ac=null);try{e.f|=Vn;var c=e.fn,v=c();e.f|=ln;var _=ps(e);if(jn()&&Ie!==null&&!Ve"
+    s += "&&_!==null&&(e.f&(ge|Re|te))===0)for(var d=0;d<Ie.length;d++)Mi(Ie[d],e);if(s!==null&&s!==e){if(Ot++,s.deps!==null)for(let p=0;p<n;p+=1)s.deps[p].rv=Ot;if(t!==null)for(const p of t)p.rv=Ot;Ie!==null&&(r===null?r=Ie:r.push(...Ie))}return(e.f&xt)!==0&&(e.f^=xt),v}catch(p){return ps(e),qa(p)}finally{e.f^=Vn,xe=t,je=n,Ie=r,D=s,Ke=i,nn(a),Ve=l,Ft=o}}function ps(e){var s;var t=e.deps"
+    s += ",n=G?.is_fork;if(xe!==null){var r;if(n||Sn(e,je),t!==null&&je>0)for(t.length=je+xe.length,r=0;r<xe.length;r++)t[je+r]=xe[r];else e.deps=t=xe;if(Kr()&&(e.f&Ge)!==0)for(r=je;r<t.length;r++)((s=t[r]).reactions??(s.reactions=[])).push(e)}else!n&&t!==null&&je<t.length&&(Sn(e,je),t.length=je);return t}function Ja(e,t){let n=t.reactions;if(n!==null){var r=$i.call(n,e);if(r!==-1){var s"
+    s += "=n.length-1;s===0?n=t.reactions=null:(n[r]=n[s],n.pop())}}if(n===null&&(t.f&ge)!==0&&(xe===null||!kn.call(xe,t))){var i=t;(i.f&Ge)!==0&&(i.f^=Ge),i.v!==ie&&Ur(i),i.ac!==null&&Pn(()=>{i.ac.abort(On),i.ac=null,se(i,te)}),Na(i),Sn(i,0)}}function Sn(e,t){var n=e.deps;if(n!==null)for(var r=t;r<n.length;r++)Ja(e,n[r])}function sn(e){var t=e.f;if((t&_e)===0){se(e,ae);var n=V;V=e;try{("
+    s += "t&(Ue|Bs))!==0?Ka(e):Jr(e),bi(e);var r=Ti(e);e.teardown=typeof r==\"function\"?r:null,e.wv=Ei;var s;Ps&&Ma&&(e.f&te)!==0&&e.deps}finally{V=n}}}function h(e){var t=e.f,n=(t&ge)!==0;if(D!==null&&!Ve){var r=V!==null&&(V.f&_e)!==0;if(!r&&(Ke===null||!Ke.has(e))){var s=D.deps;if((D.f&Vn)!==0)e.rv<Ot&&(e.rv=Ot,xe===null&&s!==null&&s[je]===e?je++:xe===null?xe=[e]:xe.push(e));else{D.de"
+    s += "ps??(D.deps=[]),kn.call(D.deps,e)||D.deps.push(e);var i=e.reactions;i===null?e.reactions=[D]:kn.call(i,D)||i.push(D)}}}if(Et&&it.has(e))return it.get(e);if(n){var a=e;if(Et){var l=a.v;return((a.f&ae)===0&&a.reactions!==null||Oi(a))&&(l=Yr(a)),it.set(a,l),l}var o=(a.f&Ge)===0&&!Ve&&D!==null&&(D.f&Ge)!==0,u=(a.f&ln)===0;Nn(a)&&(o&&(a.f|=Ge),Xs(a)),o&&!u&&(Qs(a),Ci(a))}if(Ye?.has("
+    s += "e))return Ye.get(e);if((e.f&xt)!==0)throw e.v;return e.v}function Ci(e){if(e.f|=Ge,e.deps!==null)for(const n of e.deps){var t=n.reactions;t===null?n.reactions=[e]:kn.call(t,e)||t.push(e),(n.f&ge)!==0&&(n.f&Ge)===0&&(Qs(n),Ci(n))}}function Oi(e){if(e.v===ie)return!0;if(e.deps===null)return!1;for(const t of e.deps)if(it.has(t)||(t.f&ge)!==0&&Oi(t))return!0;return!1}function nr(e)"
+    s += "{var t=Ve;try{return Ve=!0,e()}finally{Ve=t}}function Xa(e){if(!(typeof e!=\"object\"||!e||e instanceof EventTarget)){if(Gt in e)Ar(e);else if(!Array.isArray(e))for(let t in e){const n=e[t];typeof n==\"object\"&&n&&Gt in n&&Ar(n)}}}function Ar(e,t=new Set){if(typeof e==\"object\"&&e!==null&&!(e instanceof EventTarget)&&!t.has(e)){t.add(e),e instanceof Date&&e.getTime();for(let "
+    s += "r in e)try{Ar(e[r],t)}catch{}const n=zr(e);if(n!==Object.prototype&&n!==Array.prototype&&n!==Map.prototype&&n!==Set.prototype&&n!==Date.prototype){const r=Is(n);for(let s in r){const i=r[s].get;if(i)try{i.call(e)}catch{}}}}}const Qa=[\"touchstart\",\"touchmove\"];function $a(e){return Qa.includes(e)}const Lt=Symbol(\"events\"),Li=new Set,Mr=new Set;function eo(e,t,n,r={}){funct"
+    s += "ion s(i){if(r.capture||Tr.call(t,i),!i.cancelBubble)return Pn(()=>n?.call(this,i))}return e.startsWith(\"pointer\")||e.startsWith(\"touch\")||e===\"wheel\"?(s.__removed=!1,ht(()=>{s.__removed||t.addEventListener(e,s,r)})):t.addEventListener(e,s,r),s}function or(e,t,n,r,s){var i={capture:r,passive:s},a=eo(e,t,n,i);(t===document.body||t===window||t===document||t instanceof HTMLMe"
+    s += "diaElement)&&pi(()=>{a.__removed=!0,t.removeEventListener(e,a,i)})}function pe(e,t,n){(t[Lt]??(t[Lt]={}))[e]=n}function cn(e){for(var t=0;t<e.length;t++)Li.add(e[t]);for(var n of Mr)n(e)}let lr=null,ur=!1;function Tr(e){var t=this,n=t.ownerDocument,r=e.type,s=e.composedPath?.()||[],i=s[0]||e.target;lr=e,ur||(ur=!0,setTimeout(()=>{ur=!1,lr=null}));var a=0,l=lr===e&&e[Lt];if(l){v"
+    s += "ar o=s.indexOf(l);if(o!==-1&&(t===document||t===window)){e[Lt]=t;return}var u=s.indexOf(t);if(u===-1)return;o<=u&&(a=o)}if(i=s[a]||e.target,i!==t){Ns(e,\"currentTarget\",{configurable:!0,get(){return i||n}});var c=D,v=V;We(null),at(null);try{for(var _,d=[];i!==null&&i!==t;){try{var p=i[Lt]?.[r];p!=null&&(!i.disabled||e.target===i)&&p.call(i,e)}catch(b){_?d.push(b):_=b}if(e.canc"
+    s += "elBubble)break;a++,i=a<s.length?s[a]:null}if(_){for(let b of d)queueMicrotask(()=>{throw b});throw _}}finally{e[Lt]=t,delete e.currentTarget,We(c),at(v)}}}const to=globalThis?.window?.trustedTypes&&globalThis.window.trustedTypes.createPolicy(\"svelte-trusted-html\",{createHTML:e=>e});function no(e){return to?.createHTML(e)??e}function ji(e){var t=vi(\"template\");return t.inner"
+    s += "HTML=no(e.replaceAll(\"<!>\",\"\\x3C!---->\")),t.content}function At(e,t){var n=V;n.nodes===null&&(n.nodes={start:e,end:t,a:null,t:null})}function M(e,t){var n=(t&qs)!==0,r=(t&ca)!==0,s,i=!e.startsWith(\"<!>\");return()=>{s===void 0&&(s=ji(i?e:\"<!>\"+e),n||(s=ke(s)));var a=r||ui?document.importNode(s,!0):s.cloneNode(!0);if(n){var l=ke(a),o=a.lastChild;At(l,o)}else At(a,a);retu"
+    s += "rn a}}function ro(e,t,n=\"svg\"){var r=!e.startsWith(\"<!>\"),s=(t&qs)!==0,i=`<${n}>${r?e:\"<!>\"+e}</${n}>`,a;return()=>{if(!a){var l=ji(i),o=ke(l);if(s)for(a=document.createDocumentFragment();ke(o);)a.appendChild(ke(o));else a=ke(o)}var u=a.cloneNode(!0);if(s){var c=ke(u),v=u.lastChild;At(c,v)}else At(u,u);return u}}function Ee(e,t){return ro(e,t,\"svg\")}function _s(e=\"\"){"
+    s += "{var t=_t(e+\"\");return At(t,t),t}}function an(){var e=document.createDocumentFragment(),t=document.createComment(\"\"),n=_t();return e.append(t,n),At(t,n),e}function w(e,t){e!==null&&e.before(t)}function so(e){let t=0,n=Wt(0),r;return()=>{Kr()&&(h(n),mi(()=>(t===0&&(r=nr(()=>e(()=>yn(n)))),t+=1,()=>{ht(()=>{t-=1,t===0&&(r?.(),r=void 0,yn(n))})})))}}var io=tn|un;function ao(e,"
+    s += "t,n,r){new oo(e,t,n,r)}var Fe,Wr,De,Pt,ve,Te,me,Ce,tt,Rt,yt,$t,An,vt,Qn,Y,lo,uo,Cr,wt,co,Or,gn,qn,Lr,jr;class oo{constructor(t,n,r,s){z(this,Y);de(this,\"parent\");de(this,\"is_pending\",!1);de(this,\"transform_error\");z(this,Fe);z(this,Wr,null);z(this,De);z(this,Pt);z(this,ve);z(this,Te,null);z(this,me,null);z(this,Ce,null);z(this,tt,null);z(this,Rt,0);z(this,yt,0);z(this,$t,"
+    s += "!1);z(this,An,new Map);z(this,vt,null);z(this,Qn,so(()=>(F(this,vt,Wt(f(this,Rt))),()=>{F(this,vt,null)})));F(this,Fe,t),F(this,De,n),F(this,Pt,i=>{var a=V;a.b=this,a.f|=_r,r(i)}),this.parent=V.b,this.transform_error=s??this.parent?.transform_error??(i=>i),F(this,ve,Zr(()=>{O(this,Y,Or).call(this)},io))}defer_effect(t){Ks(t,f(this,An))}is_rendered(){return!this.is_pending&&(!th"
+    s += "is.parent||this.parent.is_rendered())}has_pending_snippet(){return!!f(this,De).pending}update_pending_count(t,n){O(this,Y,Lr).call(this,t,n),F(this,Rt,f(this,Rt)+t),!(!f(this,vt)||f(this,$t))&&(F(this,$t,!0),ht(()=>{F(this,$t,!1),f(this,vt)&&rn(f(this,vt),f(this,Rt))}))}get_effect_pending(){return f(this,Qn).call(this),h(f(this,vt))}error(t){if(t===Us||!f(this,De).onerror&&!f(t"
+    s += "his,De).failed)throw t;G?.is_fork?(f(this,Te)&&G.skip_effect(f(this,Te)),f(this,me)&&G.skip_effect(f(this,me)),f(this,Ce)&&G.skip_effect(f(this,Ce)),G.oncommit(()=>{O(this,Y,wt).call(this)||O(this,Y,jr).call(this,t)})):O(this,Y,jr).call(this,t)}}Fe=new WeakMap,Wr=new WeakMap,De=new WeakMap,Pt=new WeakMap,ve=new WeakMap,Te=new WeakMap,me=new WeakMap,Ce=new WeakMap,tt=new WeakMap"
+    s += ",Rt=new WeakMap,yt=new WeakMap,$t=new WeakMap,An=new WeakMap,vt=new WeakMap,Qn=new WeakMap,Y=new WeakSet,lo=function(){try{F(this,Te,Be(()=>f(this,Pt).call(this,f(this,Fe))))}catch(t){this.error(t)}},uo=function(t){const n=f(this,De).failed,{reset:r,invoke_onerror:s}=O(this,Y,Cr).call(this,t);ht(s),n&&F(this,Ce,Be(()=>{n(f(this,Fe),()=>t,()=>r)}))},Cr=function(t){var n=!1,r=!1;"
+    s += "const s=()=>{if(!O(this,Y,wt).call(this)){if(n){ha();return}n=!0,r&&Aa(),f(this,Ce)!==null&&It(f(this,Ce),()=>{F(this,Ce,null)}),O(this,Y,qn).call(this,()=>{O(this,Y,Or).call(this)})}};return{reset:s,invoke_onerror:()=>{if(!O(this,Y,wt).call(this))try{r=!0,f(this,De).onerror?.(t,s),r=!1}catch(a){rt(a,f(this,ve)&&f(this,ve).parent)}}}},wt=function(){return(f(this,ve).f&(_e|xn))!"
+    s += "==0},co=function(){const t=f(this,De).pending;t&&(this.is_pending=!0,F(this,me,Be(()=>t(f(this,Fe)))),ht(()=>{if(!O(this,Y,wt).call(this)){var n=F(this,tt,document.createDocumentFragment()),r=_t(),s=!1;if(n.append(r),F(this,Te,O(this,Y,qn).call(this,()=>{try{return Be(()=>f(this,Pt).call(this,r))}catch(i){try{this.error(i),s=!0}catch(a){rt(a,f(this,ve).parent)}return null}})),f"
+    s += "(this,Te)===null){F(this,tt,null),s&&O(this,Y,gn).call(this,G);return}f(this,yt)===0&&(f(this,Fe).before(n),F(this,tt,null),It(f(this,me),()=>{F(this,me,null)}),O(this,Y,gn).call(this,G))}}))},Or=function(){try{if(this.is_pending=this.has_pending_snippet(),F(this,yt,0),F(this,Rt,0),F(this,Te,Be(()=>{f(this,Pt).call(this,f(this,Fe))})),f(this,yt)>0){var t=F(this,tt,document.crea"
+    s += "teDocumentFragment());Xr(f(this,Te),t);const n=f(this,De).pending;F(this,me,Be(()=>n(f(this,Fe))))}else O(this,Y,gn).call(this,G)}catch(n){this.error(n)}},gn=function(t){this.is_pending=!1,t.transfer_reactions(f(this,An))},qn=function(t){var n=V,r=D,s=re;at(f(this,ve)),We(f(this,ve)),nn(f(this,ve).ctx);try{return Bt.ensure(),t()}finally{at(n),We(r),nn(s)}},Lr=function(t,n){var "
+    s += "r;if(!this.has_pending_snippet()){this.parent&&O(r=this.parent,Y,Lr).call(r,t,n);return}F(this,yt,f(this,yt)+t),f(this,yt)===0&&(O(this,Y,gn).call(this,n),f(this,me)&&It(f(this,me),()=>{F(this,me,null)}),f(this,tt)&&(f(this,Fe).before(f(this,tt)),F(this,tt,null)))},jr=function(t){f(this,Te)&&(Se(f(this,Te)),F(this,Te,null)),f(this,me)&&(Se(f(this,me)),F(this,me,null)),f(this,Ce"
+    s += ")&&(Se(f(this,Ce)),F(this,Ce,null));let n=f(this,De).failed;const r=s=>{if(O(this,Y,wt).call(this))return;const{reset:i,invoke_onerror:a}=O(this,Y,Cr).call(this,s);a(),n&&!O(this,Y,wt).call(this)&&F(this,Ce,O(this,Y,qn).call(this,()=>{try{return Be(()=>{var l=V;l.b=this,l.f|=_r,n(f(this,Fe),()=>s,()=>i)})}catch(l){return rt(l,f(this,ve).parent),null}}))};ht(()=>{if(!O(this,Y,wt"
+    s += ").call(this)){var s;try{s=this.transform_error(t)}catch(i){rt(i,f(this,ve)&&f(this,ve).parent);return}s!==null&&typeof s==\"object\"&&typeof s.then==\"function\"?s.then(r,i=>rt(i,f(this,ve)&&f(this,ve).parent)):r(s)}})};function I(e,t){var n=t==null?\"\":typeof t==\"object\"?`${t}`:t;n!==(e[vn]??(e[vn]=e.nodeValue))&&(e[vn]=n,e.nodeValue=`${n}`)}function fo(e,t){return vo(e,t)}"
+    s += "const Fn=new Map;function vo(e,{target:t,anchor:n,props:r={},events:s,context:i,intro:a=!0,transformError:l}){za();var o=void 0,u=Ya(()=>{var c=n??t.appendChild(_t());ao(c,{pending:()=>{}},d=>{Xe({});var p=re;i&&(p.c=i),s&&(r.$$events=s),o=e(d,r)||qr(),Qe()},l);var v=new Set,_=d=>{for(var p=0;p<d.length;p++){var b=d[p];if(!v.has(b)){v.add(b);var g=$a(b);for(const k of[t,documen"
+    s += "t]){var y=Fn.get(k);y===void 0&&(y=new Map,Fn.set(k,y));var m=y.get(b);m===void 0?(k.addEventListener(b,Tr,{passive:g}),y.set(b,1)):y.set(b,m+1)}}}};return _(er(Li)),Mr.add(_),()=>{for(var d of v)for(const g of[t,document]){var p=Fn.get(g),b=p.get(d);--b==0?(g.removeEventListener(d,Tr),p.delete(d),p.size===0&&Fn.delete(g)):p.set(d,b)}Mr.delete(_),c!==n&&c.parentNode?.removeChil"
+    s += "d(c)}});return ho.set(o,u),o}let ho=new WeakMap;var qe,nt,Oe,Nt,Mn,Tn,$n;class po{constructor(t,n=!0){de(this,\"anchor\");z(this,qe,new Map);z(this,nt,new Map);z(this,Oe,new Map);z(this,Nt,new Set);z(this,Mn,!0);z(this,Tn,t=>{if(f(this,qe).has(t)){var n=f(this,qe).get(t),r=f(this,nt).get(n);if(r)Zn(r),f(this,Nt).delete(n);else{var s=f(this,Oe).get(n);s&&(Zn(s.effect),f(this,nt)"
+    s += ".set(n,s.effect),f(this,Oe).delete(n),s.fragment.lastChild.remove(),this.anchor.before(s.fragment),r=s.effect)}for(const[i,a]of f(this,qe)){if(f(this,qe).delete(i),i===t)break;const l=f(this,Oe).get(a);l&&(Se(l.effect),f(this,Oe).delete(a))}for(const[i,a]of f(this,nt)){if(i===n||f(this,Nt).has(i))continue;const l=()=>{if(Array.from(f(this,qe).values()).includes(i)){var u=docume"
+    s += "nt.createDocumentFragment();Xr(a,u),u.append(_t()),f(this,Oe).set(i,{effect:a,fragment:u})}else Se(a);f(this,Nt).delete(i),f(this,nt).delete(i)};f(this,Mn)||!r?(f(this,Nt).add(i),It(a,l,!1)):l()}}});z(this,$n,t=>{f(this,qe).delete(t);const n=Array.from(f(this,qe).values());for(const[r,s]of f(this,Oe))n.includes(r)||(Se(s.effect),f(this,Oe).delete(r))});this.anchor=t,F(this,Mn,n"
+    s += ")}ensure(t,n){var r=G,s=di();if(n&&!f(this,nt).has(t)&&!f(this,Oe).has(t))if(s){var i=document.createDocumentFragment(),a=_t();i.append(a),f(this,Oe).set(t,{effect:Be(()=>n(a)),fragment:i})}else f(this,nt).set(t,Be(()=>n(this.anchor)));if(f(this,qe).set(r,t),s){for(const[l,o]of f(this,nt))l===t?r.unskip_effect(o):r.skip_effect(o);for(const[l,o]of f(this,Oe))l===t?r.unskip_effec"
+    s += "t(o.effect):r.skip_effect(o.effect);r.oncommit(f(this,Tn)),r.ondiscard(f(this,$n))}else f(this,Tn).call(this,r)}}qe=new WeakMap,nt=new WeakMap,Oe=new WeakMap,Nt=new WeakMap,Mn=new WeakMap,Tn=new WeakMap,$n=new WeakMap;function L(e,t,n=!1){var r=new po(e),s=n?tn:0;function i(a,l){r.ensure(a,l)}Zr(()=>{var a=!1;t((l,o=0)=>{a=!0,i(o,l)}),a||i(-1,null)},s)}function rr(e,t){return t"
+    s += "}function _o(e,t,n){for(var r=[],s=t.length,i,a=t.length,l=0;l<s;l++){let v=t[l];It(v,()=>{if(i){if(i.pending.delete(v),i.done.add(v),i.pending.size===0){var _=e.outrogroups;Pr(e,er(i.done)),_.delete(i),_.size===0&&(e.outrogroups=null)}}else a-=1},!1)}if(a===0){var o=r.length===0&&n!==null&&e.pending.size===0;if(o){var u=n,c=u.parentNode;Ha(c),c.append(u),e.items.clear()}Pr(e,t"
+    s += ",!o)}else i={pending:new Set(t),done:new Set},(e.outrogroups??(e.outrogroups=new Set)).add(i)}function Pr(e,t,n=!0){var r;if(e.pending.size>0){r=new Set;for(const a of e.pending.values())for(const l of a)r.add(e.items.get(l).e)}for(var s=0;s<t.length;s++){var i=t[s];if(r?.has(i)){i.f|=st;const a=document.createDocumentFragment();Xr(i,a)}else Se(t[s],n)}}var Dn;function fn(e,t,n"
+    s += ",r,s,i=null){var a=e,l=new Map,o=(t&Hs)!==0;if(o){var u=e;a=u.appendChild(_t())}var c=null,v=Js(()=>{var m=n();return Rs(m)?m:m==null?[]:er(m)}),_=new Map,d=!0;function p(m){if((y.effect.f&_e)===0){y.pending.delete(m);var k=h(v);y.fallback=c,go(y,k,a,t,r),c!==null&&(k.length===0?(c.f&st)===0?Zn(c):(c.f^=st,mn(c,null,a)):It(c,()=>{c=null}))}}function b(m){y.pending.delete(m)}var"
+    s += " g=Zr(()=>{for(var m=h(v),k=m.length,C=new Set,S=G,P=di(),R=0;R<k;R+=1){var Q=m[R],$=r(Q,R),q=d?null:l.get($);q?(q.v&&rn(q.v,Q),q.i&&rn(q.i,R),P&&S.unskip_effect(q.e)):(q=mo(l,d?a:Dn??(Dn=_t()),Q,$,R,s,t,n),d||(q.e.f|=st),l.set($,q)),C.add($)}if(k===0&&i&&!c&&(d?c=Be(()=>i(a)):(c=Be(()=>i(Dn??(Dn=_t()))),c.f|=st)),k>C.size&&ma(),!d)if(_.set(S,C),P){for(const[A,T]of l)C.has(A)||"
+    s += "S.skip_effect(T.e);S.oncommit(p),S.ondiscard(b)}else p(S);h(v)}),y={effect:g,items:l,pending:_,outrogroups:null,fallback:c};d=!1}function dn(e){for(;e!==null&&(e.f&Ze)===0;)e=e.next;return e}function go(e,t,n,r,s){var i=(r&la)!==0,a=t.length,l=e.items,o=dn(e.effect.first),u,c=null,v,_=[],d=[],p,b,g,y;if(i)for(y=0;y<a;y+=1)p=t[y],b=s(p,y),g=l.get(b).e,(g.f&st)===0&&(g.nodes?.a?."
+    s += "measure(),(v??(v=new Set)).add(g));for(y=0;y<a;y+=1){if(p=t[y],b=s(p,y),g=l.get(b).e,e.outrogroups!==null)for(const q of e.outrogroups)q.pending.delete(g),q.done.delete(g);if((g.f&we)!==0&&(Zn(g),i&&(g.nodes?.a?.unfix(),(v??(v=new Set)).delete(g))),(g.f&st)!==0)if(g.f^=st,g===o)mn(g,null,n);else{var m=c?c.next:o;g===e.effect.last&&(e.effect.last=g.prev),g.prev&&(g.prev.next=g.n"
+    s += "ext),g.next&&(g.next.prev=g.prev),bt(e,c,g),bt(e,g,m),mn(g,m,n),c=g,_=[],d=[],o=dn(c.next);continue}if(g!==o){if(u!==void 0&&u.has(g)){if(_.length<d.length){var k=d[0],C;c=k.prev;var S=_[0],P=_[_.length-1];for(C=0;C<_.length;C+=1)mn(_[C],k,n);for(C=0;C<d.length;C+=1)u.delete(d[C]);bt(e,S.prev,P.next),bt(e,c,S),bt(e,P,k),o=k,c=P,y-=1,_=[],d=[]}else u.delete(g),mn(g,o,n),bt(e,g.p"
+    s += "rev,g.next),bt(e,g,c===null?e.effect.first:c.next),bt(e,c,g),c=g;continue}for(_=[],d=[];o!==null&&o!==g;)(u??(u=new Set)).add(o),d.push(o),o=dn(o.next);if(o===null)continue}(g.f&st)===0&&_.push(g),c=g,o=dn(g.next)}if(e.outrogroups!==null){for(const q of e.outrogroups)q.pending.size===0&&(Pr(e,er(q.done)),e.outrogroups?.delete(q));e.outrogroups.size===0&&(e.outrogroups=null)}if("
+    s += "o!==null||u!==void 0){var R=[];if(u!==void 0)for(g of u)(g.f&we)===0&&R.push(g);for(;o!==null;)(o.f&we)===0&&o!==e.fallback&&R.push(o),o=dn(o.next);var Q=R.length;if(Q>0){var $=(r&Hs)!==0&&a===0?n:null;if(i){for(y=0;y<Q;y+=1)R[y].nodes?.a?.measure();for(y=0;y<Q;y+=1)R[y].nodes?.a?.fix()}_o(e,R,$)}}i&&ht(()=>{if(v!==void 0)for(g of v)g.nodes?.a?.apply()})}function mo(e,t,n,r,s,i"
+    s += ",a,l){var o=(a&aa)!==0?(a&ua)===0?Ba(n,!1,!1):Wt(n):null,u=(a&oa)!==0?Wt(s):null;return{v:o,i:u,e:Be(()=>(i(t,o??n,u??s,l),()=>{e.delete(r)}))}}function mn(e,t,n){if(e.nodes)for(var r=e.nodes.start,s=e.nodes.end,i=t&&(t.f&st)===0?t.nodes.start:n;r!==null;){var a=Rn(r);if(i.before(r),r===s)return;r=a}}function bt(e,t,n){t===null?e.effect.first=n:t.next=n,n===null?e.effect.last=t"
+    s += ":n.prev=t}function bo(e,t,n=!1,r=!1,s=!1,i=!1){var a=e,l=\"\";if(n)var o=e;N(()=>{var u=V;if(l!==(l=t()??\"\")){if(n){u.nodes=null,o.innerHTML=l,l!==\"\"&&At(ke(o),o.lastChild);return}if(u.nodes!==null&&(wi(u.nodes.start,u.nodes.end),u.nodes=null),l!==\"\"){var c=r?fa:s?da:void 0,v=vi(r?\"svg\":s?\"math\":\"template\",c);v.innerHTML=l;var _=r||s?v:v.content;if(At(ke(_),_.lastCh"
+    s += "ild),r||s)for(;ke(_);)a.before(ke(_));else a.before(_)}}})}const gs=[...` \t\n"
+    s += "\\r\\f\\xA0\\v\\uFEFF`];function wo(e,t,n){var r=e==null?\"\":\"\"+e;if(t&&(r=r?r+\" \"+t:t),n){for(var s of Object.keys(n))if(n[s])r=r?r+\" \"+s:s;else if(r.length)for(var i=s.length,a=0;(a=r.indexOf(s,a))>=0;){var l=a+i;(a===0||gs.includes(r[a-1]))&&(l===r.length||gs.includes(r[l]))?r=(a===0?\"\":r.substring(0,a))+r.substring(l+1):a=l}}return r===\"\"?null:r}function be(e,t,n"
+    s += ",r,s,i){var a=e[gr];if(a!==n||a===void 0){var l=wo(n,r,i);l==null?e.removeAttribute(\"class\"):t?e.className=l:e.setAttribute(\"class\",l),e[gr]=n}else if(i&&s!==i)for(var o in i){var u=!!i[o];(s==null||u!==!!s[o])&&e.classList.toggle(o,u)}return i}const yo=Symbol(\"is custom element\"),ko=Symbol(\"is html\");function ue(e,t,n,r){var s=xo(e),i=s[t];i!==(s[t]=n)&&(t===\"loading"
+    s += "\"&&(e[sa]=n),n==null?e.removeAttribute(t):typeof n!=\"string\"&&So(e).has(t)?e[t]=n:e.setAttribute(t,n))}function xo(e){return e[zn]??(e[zn]={[yo]:e.nodeName.includes(\"-\"),[ko]:e.namespaceURI===Ys})}var ms=new Map;function So(e){var t=e.getAttribute(\"is\")||e.nodeName,n=ms.get(t);if(n)return n;ms.set(t,n=new Set);for(var r,s=e,i=Element.prototype;i!==s;){r=Is(s);for(var a i"
+    s += "n r)r[a].set&&a!==\"innerHTML\"&&a!==\"textContent\"&&a!==\"innerText\"&&n.add(a);s=zr(s)}return n}function cr(e,t){return e===t||e?.[Gt]===t}function bs(e=qr(),t,n,r){var s=re.r,i=V;return Va(()=>{var a,l;return mi(()=>{a=l,l=[],nr(()=>{cr(n(...l),e)||(t(e,...l),a&&cr(n(...a),e)&&t(null,...a))})}),()=>{let o=i;for(;o!==s&&o.parent!==null&&o.parent.f&xn;)o=o.parent;const u=()=>"
+    s += "{l&&cr(n(...l),e)&&t(null,...l)},c=o.teardown;o.teardown=()=>{u(),c?.()}}}),e}function Eo(e=!1){const t=re,n=t.l.u;if(!n)return;let r=()=>Xa(t.s);if(e){let s=0,i={};const a=tr(()=>{let l=!1;const o=t.s;for(const u in o)o[u]!==i[u]&&(i[u]=o[u],l=!0);return l&&s++,s});r=()=>h(a)}n.b.length&&gi(()=>{ws(t,r),pr(n.b)}),Er(()=>{const s=nr(()=>n.m.map(na));return()=>{for(const i of s)"
+    s += "typeof i==\"function\"&&i()}}),n.a.length&&Er(()=>{ws(t,r),pr(n.a)})}function ws(e,t){if(e.l.s)for(const n of e.l.s)h(n);t()}function on(e,t,n,r){var s=r,i=!0,a=()=>(i&&(i=!1,s=r),s),l;l=e[t],l===void 0&&r!==void 0&&(l=a());var o;return o=()=>{var u=e[t];return u===void 0?a():(i=!0,u)},o}function Ao(e){re===null&&_a(),Ln&&re.l!==null?Mo(re).m.push(e):Er(()=>{const t=nr(e);if(ty"
+    s += "peof t==\"function\")return t})}function Mo(e){var t=e.l;return t.u??(t.u={a:[],b:[],m:[]})}const To=\"5\";var js;typeof window<\"u\"&&((js=window.__svelte??(window.__svelte={})).v??(js.v=new Set)).add(To);function Pe(e){let t;try{t=JSON.stringify(e)}catch(n){Rr(\"post: \"+n);return}try{const n=window.buoy;if(n&&typeof n.postMessage==\"function\"){n.postMessage(t);return}}catch"
+    s += "(n){Rr(\"post: \"+n)}try{console.log(\"[chat -> host]\",t)}catch{}}const Co=50,Bn=[];function Rr(e){try{Bn.push(String(e)),Bn.length>Co&&Bn.shift();const t=document.getElementById(\"debug\");t&&(t.textContent=Bn.join(`\n"
+    s += "`))}catch{}}const K=kt({items:[],empty:{title:\"Ask the agent\",subtitle:\"Describe a change, ask about your project, or pick a suggestion.\",suggestions:[]},busy:!1,busyLabel:\"\",lightbox:null}),Dt=new Map,fr=new Map,Jn=new Map,X=(e,t=\"\")=>e==null?t:typeof e==\"string\"?e:String(e),qt=e=>{const t=Number(e);return Number.isFinite(t)?t:0},He=e=>e&&typeof e==\"object\"?e:{},Oo"
+    s += "=[\"user\",\"assistant\",\"system\",\"error\",\"notice\"];let Lo=0;const Nr=e=>e+\"-\"+ ++Lo;function Qr(e){return K.items.push(e),K.items[K.items.length-1]}function jo(e){return Array.isArray(e)?e.filter(t=>t&&typeof t==\"object\").map(t=>{const n=X(t.dataUrl),r=t.kind===\"image\"&&/^data:image\\//i.test(n)?\"image\":\"file\";return{name:X(t.name,\"attachment\"),kind:r,dataUrl"
+    s += ":r===\"image\"?n:\"\",detail:X(t.detail)}}):[]}const pt=new Map;let Un=0;function Po(){if(Un)return;Un=(typeof requestAnimationFrame==\"function\"?requestAnimationFrame:t=>setTimeout(t,16))(ys)||1,setTimeout(()=>Un&&ys(),120)}function ys(){if(Un=0,!!pt.size){for(const[e,t]of pt){const n=Dt.get(e);n&&(n.text+=t)}pt.clear()}}function Ro(e){const t=pt.get(e);if(t===void 0)return;p"
+    s += "t.delete(e);const n=Dt.get(e);n&&(n.text+=t)}function ks(e,t=\"assistant\"){let n=Dt.get(e);return n||(n=Qr({kind:\"message\",id:e,role:t,author:\"\",text:\"\",attachments:[],streaming:!1,stats:null,continuation:!1}),Dt.set(e,n)),n}function xs(e,t,n){const r=X(t.id)||Nr(e);let s=Jn.get(r);return s?(Object.assign(s,n),s.outcome=\"\"):(s=Qr({kind:e,id:r,outcome:\"\",...n}),Jn.set"
+    s += "(r,s)),s}const No={reset(){pt.clear(),Dt.clear(),fr.clear(),Jn.clear(),K.items=[],K.busy=!1,K.lightbox=null},setTheme(e){const t=He(e).dark,n=document.documentElement;t===!0||t===!1?n.setAttribute(\"data-theme\",t?\"dark\":\"light\"):n.removeAttribute(\"data-theme\")},setEmpty(e){e=He(e),e.title!==void 0&&(K.empty.title=X(e.title)),e.subtitle!==void 0&&(K.empty.subtitle=X(e.sub"
+    s += "title)),e.suggestions!==void 0&&(K.empty.suggestions=Array.isArray(e.suggestions)?e.suggestions.map(t=>X(t)).filter(Boolean):[])},addMessage(e){e=He(e);const t=X(e.id)||Nr(\"msg\"),n=Oo.includes(e.role)?e.role:\"assistant\";pt.delete(t);const r=ks(t,n);r.role=n,r.author=X(e.author),r.text=X(e.text),r.attachments=jo(e.attachments),r.streaming=n===\"assistant\"&&e.streaming===!0,"
+    s += "r.continuation=n===\"assistant\"&&e.continuation===!0},appendDelta(e){e=He(e);const t=X(e.id),n=X(e.text);if(!t)return;const r=ks(t);!r.streaming&&r.role===\"assistant\"&&(r.streaming=!0),n&&(pt.set(t,(pt.get(t)||\"\")+n),Po())},finishMessage(e){const t=X(He(e).id);Ro(t);const n=Dt.get(t);n&&(n.streaming=!1)},upsertTool(e){e=He(e);const t=X(e.id)||Nr(\"tool\"),n=[\"running\",\""
+    s += "complete\",\"failed\"].includes(e.status)?e.status:\"running\";let r=fr.get(t);if(!r){r=Qr({kind:\"tool\",id:t,name:X(e.name,\"tool\"),status:n,detail:X(e.detail),input:X(e.input),output:X(e.output)}),fr.set(t,r);return}r.status=n;for(const s of[\"name\",\"detail\",\"input\",\"output\"])e[s]!==void 0&&e[s]!==null&&(r[s]=typeof e[s]==\"string\"?e[s]:JSON.stringify(e[s]))},showPr"
+    s += "oposal(e){e=He(e);const t=(Array.isArray(e.files)?e.files:[]).filter(n=>n&&typeof n==\"object\").map(n=>({path:X(n.path,\"untitled\"),revision:X(n.revision),added:qt(n.added),removed:qt(n.removed),diff:X(n.diff)}));xs(\"proposal\",e,{title:X(e.title),files:t,canApply:e.canApply!==!1})},showPermission(e){e=He(e),xs(\"permission\",e,{title:X(e.title,\"Permission requested\"),deta"
+    s += "ils:typeof e.details==\"string\"||e.details==null?X(e.details):JSON.stringify(e.details),canAccept:e.canAccept!==!1})},resolveCard(e){e=He(e);const t=Jn.get(X(e.id));t&&(t.outcome=X(e.outcome,\"dismissed\"))},setBusy(e){e=He(e),K.busy=!!e.busy,K.busyLabel=X(e.label)},setStats(e){e=He(e);const t=Dt.get(X(e.id));if(!t)return;const n={tokensOut:qt(e.tokensOut),tokensIn:qt(e.tokens"
+    s += "In),tokensPerSecond:qt(e.tokensPerSecond),elapsedMs:qt(e.elapsedMs),estimated:!!e.estimated},r=t.stats;r&&r.tokensOut===n.tokensOut&&r.tokensIn===n.tokensIn&&r.tokensPerSecond===n.tokensPerSecond&&r.elapsedMs===n.elapsedMs&&r.estimated===n.estimated||(t.stats=n)},copySelection(){const e=window.getSelection?window.getSelection():null;Pe({action:\"copySelection\",text:e?e.toStrin"
+    s += "g():\"\"})},selectAll(){const e=document.querySelector(\".content\")||document.body,t=window.getSelection?window.getSelection():null;!t||!e||t.selectAllChildren(e)}},Pi={};for(const[e,t]of Object.entries(No))Pi[e]=function(n){try{t(n)}catch(r){Rr(e+\": \"+(r&&r.stack?r.stack:r))}return!0};const Io={\"&\":\"&amp;\",\"<\":\"&lt;\",\">\":\"&gt;\",'\"':\"&quot;\",\"'\":\"&#39;\"},y"
+    s += "e=e=>String(e).replace(/[&<>\"']/g,t=>Io[t]),Ri=e=>/^https?:/i.test(String(e).trim()),Mt=e=>new Set(e.split(\" \")),Fo=Mt(\"dim as if then else elseif end sub function class return for next each in public private property new nil true false try catch throw select case while import handle inherits implements me and or not xor mod to step do loop exit continue byref byval optiona"
+    s += "l const var enum interface shared static protected friend overrides overridable mustoverride finally declare of is isnot wend until with event raiseevent addhandler get set structure namespace\"),Do=Mt(\"string integer double boolean array object variant int8 int16 int32 int64 uint8 uint16 uint32 uint64 single byte\"),Bo=Mt(\"const let var function return if else for while do s"
+    s += "witch case break continue new this class extends super import export from default async await try catch finally throw typeof instanceof in of void delete yield static get set interface type enum implements public private protected readonly as declare namespace keyof\"),Wo=Mt(\"true false null undefined NaN Infinity\"),zo=Mt(\"def return if elif else for while in not and or is i"
+    s += "mport from as class try except finally raise with lambda pass break continue global nonlocal yield async await del assert match case\"),Ho=Mt(\"True False None self\"),qo=Mt(\"if then else elif fi for while do done case esac in function return export local readonly set unset echo cd exit source sudo\"),Ss={buoy:{re:/('[^\\n]*|\\bREM\\b[^\\n]*)|(\"(?:[^\"\\\\\\n]|\\\\.)*\"?)|(\\"
+    s += "b\\d+(?:\\.\\d+)?\\b|&H[0-9A-F]+\\b)|([A-Za-z_]\\w*)/giy,kw:Fo,ty:Do,ci:!0},js:{re:/(\\/\\/[^\\n]*|\\/\\*[\\s\\S]*?(?:\\*\\/|$))|(\"(?:[^\"\\\\\\n]|\\\\.)*\"?|'(?:[^'\\\\\\n]|\\\\.)*'?|`(?:[^`\\\\]|\\\\.)*`?)|(\\b(?:0x[\\da-f]+|\\d+(?:\\.\\d+)?(?:e[+-]?\\d+)?)n?\\b)|([A-Za-z_$][\\w$]*)/giy,kw:Bo,lit:Wo},py:{re:/(#[^\\n]*)|(\"\"\"[\\s\\S]*?(?:\"\"\"|$)|'''[\\s\\S]*?(?:'''|$)|[rb"
+    s += "fu]?\"(?:[^\"\\\\\\n]|\\\\.)*\"?|[rbfu]?'(?:[^'\\\\\\n]|\\\\.)*'?)|(\\b\\d+(?:\\.\\d+)?\\b)|([A-Za-z_]\\w*)/giy,kw:zo,lit:Ho},json:{re:/(\\/\\/[^\\n]*)|(\"(?:[^\"\\\\\\n]|\\\\.)*\"?)|(-?\\b\\d+(?:\\.\\d+)?(?:[eE][+-]?\\d+)?\\b)|([A-Za-z_]\\w*)/gy,lit:Mt(\"true false null\"),json:!0},sh:{re:/(#[^\\n]*)|(\"(?:[^\"\\\\]|\\\\.)*\"?|'[^']*'?)|(\\$\\{?[\\w@#?*!-]+\\}?)|([A-Za-z_][\\w"
+    s += "-]*)/gmy,kw:qo,vars:!0}},Uo={buoy:\"buoy\",bui:\"buoy\",vb:\"buoy\",vbnet:\"buoy\",basic:\"buoy\",xojo:\"buoy\",js:\"js\",javascript:\"js\",jsx:\"js\",ts:\"js\",typescript:\"js\",tsx:\"js\",mjs:\"js\",svelte:\"js\",py:\"py\",python:\"py\",python3:\"py\",json:\"json\",jsonc:\"json\",json5:\"json\",sh:\"sh\",bash:\"sh\",shell:\"sh\",zsh:\"sh\",console:\"sh\",shellsession:\"sh\",t"
+    s += "erminal:\"sh\"};function Yo(e){return Uo[String(e||\"\").toLowerCase()]||\"\"}function Vo(e,t){const n=Ss[Yo(t)];if(!n)return ye(e);const r=n.re;let s=\"\",i=0,a=\"\";const l=()=>{a&&(s+=ye(a)),a=\"\"},o=(u,c)=>{l(),s+='<span class=\"tk-'+u+'\">'+ye(c)+\"</span>\"};for(;i<e.length;){r.lastIndex=i;const u=r.exec(e);if(!u||u[0]===\"\"){a+=e[i++];continue}const c=u[0];if(u[1]&&n.v"
+    s += "ars&&i>0&&!/\\s/.test(e[i-1])){a+=e[i++];continue}if(u[1])o(\"c\",c);else if(u[2])n.json&&/^\\s*:/.test(e.slice(i+c.length,i+c.length+8))?o(\"k\",c):o(\"s\",c);else if(u[3])o(n.vars?\"v\":\"n\",c);else{const v=n.ci?c.toLowerCase():c;(s.length||a.length?e[i-1]:\"\")===\".\"&&!n.ci?a+=c:n.lit&&n.lit.has(c)||n.ci&&(v===\"true\"||v===\"false\"||v===\"nil\")?o(\"l\",c):n.kw&&n.kw.ha"
+    s += "s(v)?o(\"kw\",c):n.ty&&n.ty.has(v)||/^[A-Z]/.test(c)&&!n.ci&&!n.json&&n!==Ss.sh?o(\"t\",c):e[i+c.length]===\"(\"?o(\"f\",c):a+=c}i+=c.length}return l(),s}const Go='<span class=\"caret\" aria-hidden=\"true\"></span>',Wn=\"\\uE000\";function $r(e){const t=[],n=s=>Wn+(t.push(s)-1)+Wn;let r=String(e).replace(/\\uE000/g,\"\");return r=r.replace(/(`+)([\\s\\S]*?[^`])\\1(?!`)/g,(s,i,a"
+    s += ")=>n(\"<code>\"+ye(a.replace(/^ (.*) $/,\"$1\"))+\"</code>\")),r=r.replace(/\\[([^\\]\\n]+)\\]\\(\\s*<?((?:[^\\s()<>]|\\([^\\s()<>]*\\))+)>?(?:\\s+\"[^\"]*\")?\\s*\\)/g,(s,i,a)=>Ri(a)?n('<a href=\"'+ye(a)+'\" data-href=\"'+ye(a)+'\" title=\"'+ye(a)+'\">'+dr(ye(i))+\"</a>\"):n(dr(ye(i)))),r=r.replace(/<((?:https?|file):\\/\\/[^\\s>]+)>|\\b((?:https?:\\/\\/|file:\\/\\/)[^\\s<>()"
+    s += "\\[\\]\"'`]*[^\\s<>()\\[\\]\"'`.,;:!?*_~])/gi,(s,i,a)=>{const l=i||a;return n('<a href=\"'+ye(l)+'\" data-href=\"'+ye(l)+'\">'+ye(l)+\"</a>\")}),r=dr(ye(r)),r=r.replace(/(?: {2,}|\\\\)\\n/g,\"<br>\"),r.replace(new RegExp(Wn+\"(\\\\d+)\"+Wn,\"g\"),(s,i)=>t[+i])}function dr(e){return e.replace(/\\*\\*(?=\\S)([\\s\\S]*?\\S)\\*\\*/g,\"<strong>$1</strong>\").replace(/(^|[^\\w])__(?="
+    s += "\\S)([\\s\\S]*?\\S)__(?!\\w)/g,\"$1<strong>$2</strong>\").replace(/(^|[^*\\w])\\*(?=[^\\s*])([^*\\n]*?[^\\s*])\\*(?!\\*)/g,\"$1<em>$2</em>\").replace(/(^|[^\\w])_(?=[^\\s_])([^_\\n]*?[^\\s_])_(?!\\w)/g,\"$1<em>$2</em>\").replace(/~~(?=\\S)([\\s\\S]*?\\S)~~/g,\"<del>$1</del>\")}const ee={fence:/^ {0,3}(`{3,}|~{3,})\\s*([^\\s`]*)[^`]*$/,heading:/^ {0,3}(#{1,6})(?:\\s+(.*?))?\\s*#"
+    s += "*\\s*$/,hr:/^ {0,3}([-*_])(?:\\s*\\1){2,}\\s*$/,quote:/^ {0,3}>\\s?/,list:/^(\\s*)([-*+]|\\d{1,9}[.)])\\s+(.*)$/,listEmpty:/^(\\s*)([-*+]|\\d{1,9}[.)])\\s*$/,tableSep:/^\\s*\\|?\\s*:?-+:?\\s*(\\|\\s*:?-+:?\\s*)*\\|?\\s*$/,blank:/^\\s*$/},Ir=e=>/^[ \\t]*/.exec(e)[0].replace(/\\t/g,\"    \").length;function Fr(e,t){return ee.fence.test(e)||ee.heading.test(e)||ee.hr.test(e)||ee.qu"
+    s += "ote.test(e)||ee.list.test(e)||e.includes(\"|\")&&t!==void 0&&ee.tableSep.test(t)&&t.includes(\"-\")}function vr(e){let t=e.trim();t.startsWith(\"|\")&&(t=t.slice(1)),t.endsWith(\"|\")&&!t.endsWith(\"\\\\|\")&&(t=t.slice(0,-1));const n=[];let r=\"\",s=!1;for(let i=0;i<t.length;i++){const a=t[i];a===\"\\\\\"&&t[i+1]===\"|\"?(r+=\"|\",i++):a===\"`\"?(s=!s,r+=a):a===\"|\"&&!s?(n.pu"
+    s += "sh(r.trim()),r=\"\"):r+=a}return n.push(r.trim()),n}function Ko(e,t,n,r){const s=ye(t||\"text\");return'<div class=\"code-block'+(n?\" open\":\"\")+'\"><div class=\"code-head\"><span class=\"code-lang\">'+s+'</span><button type=\"button\" class=\"code-copy\" data-copy title=\"Copy code\"><svg viewBox=\"0 0 16 16\" aria-hidden=\"true\"><rect x=\"5\" y=\"5\" width=\"8.5\" height="
+    s += "\"8.5\" rx=\"1.6\"/><path d=\"M10.5 3V2.6c0-.9-.7-1.6-1.6-1.6H3.6C2.7 1 2 1.7 2 2.6v5.3c0 .9.7 1.6 1.6 1.6H4\"/></svg><span>Copy</span></button></div><pre><code>'+Vo(e,t)+r+\"</code></pre></div>\"}function es(e,t){const n=[];let r=0;const s=e.length;for(;r<s;){const i=e[r];if(ee.blank.test(i)){r++;continue}let a;if(a=ee.fence.exec(i)){const o=a[1],u=a[2]||\"\",c=Ir(i),v=[];r++;"
+    s += "let _=!1;for(;r<s;){const d=e[r],p=d.trim();if(p.startsWith(o[0].repeat(o.length))&&/^(`+|~+)$/.test(p)&&p[0]===o[0]){_=!0,r++;break}v.push(c?d.replace(new RegExp(\"^ {0,\"+c+\"}\"),\"\"):d),r++}n.push({kind:\"code\",code:v.join(`\n"
+    s += "`),lang:u,open:!_});continue}if(a=ee.heading.exec(i)){const o=Math.min(a[1].length+0,6);n.push({kind:\"inline\",tag:\"h\"+o,text:a[2]||\"\"}),r++;continue}if(ee.hr.test(i)){n.push({kind:\"html\",html:\"<hr>\"}),r++;continue}if(ee.quote.test(i)){const o=[];for(;r<s&&!ee.blank.test(e[r])&&(ee.quote.test(e[r])||!Fr(e[r],e[r+1]));)o.push(e[r].replace(ee.quote,\"\")),r++;n.push({kin"
+    s += "d:\"quote\",lines:o});continue}if(i.includes(\"|\")&&r+1<s&&ee.tableSep.test(e[r+1])&&e[r+1].includes(\"-\")){const o=vr(i),u=vr(e[r+1]).map(v=>/^:-+:$/.test(v)?\"center\":/-+:$/.test(v)?\"right\":/^:-+/.test(v)?\"left\":\"\");r+=2;const c=[];for(;r<s&&!ee.blank.test(e[r])&&e[r].includes(\"|\");)c.push(vr(e[r])),r++;n.push({kind:\"table\",head:o,aligns:u,rows:c});continue}if(ee"
+    s += ".list.test(i)){const o=Zo(e,r);r=o.next,n.push(o.block);continue}const l=[i];for(r++;r<s&&!ee.blank.test(e[r])&&!Fr(e[r],e[r+1]);)l.push(e[r]),r++;n.push({kind:\"inline\",tag:\"p\",text:l.join(`\n"
+    s += "`).trim()})}return n.map((i,a)=>{const l=a===n.length-1?t:\"\";switch(i.kind){case\"code\":return Ko(i.code,i.lang,i.open,l);case\"inline\":return\"<\"+i.tag+\">\"+$r(i.text)+l+\"</\"+i.tag+\">\";case\"quote\":return\"<blockquote>\"+es(i.lines,l)+\"</blockquote>\";case\"table\":return Xo(i)+l;case\"list\":return Jo(i,l);default:return i.html+l}}).join(\"\")}function Zo(e,t){con"
+    s += "st n=ee.list.exec(e[t]),r=Ir(e[t]),s=/\\d/.test(n[2]),i=s?parseInt(n[2],10):1,a=[];let l=null,o=t,u=!1;for(;o<e.length;){const c=e[o];if(ee.blank.test(c)){u=!0,o++;continue}const v=Ir(c),_=ee.list.exec(c)||ee.listEmpty.exec(c);if(_&&v<r+2&&v>=r-1){if(/\\d/.test(_[2])!==s)break;l={text:[_[3]||\"\"],sub:[]},a.push(l),u=!1,o++;continue}if(v>=r+2&&l){if(l.sub.length||ee.list.test(c"
+    s += ")||ee.fence.test(c.trim())||u){if(u&&l.sub.length&&l.sub.push(\"\"),l.sub.push(c.slice(Math.min(v,r+2)).replace(/^\\s{0,2}/,\"\")),ee.fence.test(c.trim())){for(o++;o<e.length;){const d=e[o];if(l.sub.push(d.replace(new RegExp(\"^ {0,\"+(r+2)+\"}\"),\"\")),o++,/^\\s*(`{3,}|~{3,})\\s*$/.test(d))break}u=!1;continue}}else l.text.push(c.trim());u=!1,o++;continue}if(!u&&l&&!Fr(c,e[o+1"
+    s += "])){l.text.push(c.trim()),o++;continue}break}return{next:o,block:{kind:\"list\",ordered:s,startNum:i,items:a}}}function Jo(e,t){const n=e.ordered?\"ol\":\"ul\",r=e.ordered&&e.startNum!==1?' start=\"'+e.startNum+'\"':\"\",s=e.items.map((i,a)=>{const l=a===e.items.length-1;let o=i.text.join(`\n"
+    s += "`),u=\"\";const c=/^\\[([ xX])\\]\\s+/.exec(o);c&&(u='<span class=\"task'+(c[1]===\" \"?\"\":\" done\")+'\"></span>',o=o.slice(c[0].length));const v=i.sub.length?es(i.sub,l?t:\"\"):\"\";return\"<li\"+(u?' class=\"task-item\"':\"\")+\">\"+u+$r(o)+(l&&!v?t:\"\")+v+\"</li>\"});return\"<\"+n+r+\">\"+s.join(\"\")+\"</\"+n+\">\"}function Xo(e){const t=(i,a,l)=>\"<\"+i+(e.aligns[l]?' "
+    s += "style=\"text-align:'+e.aligns[l]+'\"':\"\")+\">\"+$r(a)+\"</\"+i+\">\",n=e.head.length,r=\"<tr>\"+e.head.map((i,a)=>t(\"th\",i,a)).join(\"\")+\"</tr>\",s=e.rows.map(i=>{const a=[];for(let l=0;l<n;l++)a.push(t(\"td\",i[l]||\"\",l));return\"<tr>\"+a.join(\"\")+\"</tr>\"}).join(\"\");return'<div class=\"table-wrap\"><table><thead>'+r+\"</thead><tbody>\"+s+\"</tbody></table></div>"
+    s += "\"}function Qo(e,t=!1){const n=String(e||\"\").replace(/\\r\\n?/g,`\n"
+    s += "`),r=t?Go:\"\";return n.trim()?es(n.split(`\n"
+    s += "`),r):r}var $o=M('<div class=\"md\"></div>');function Es(e,t){Xe(t,!0);let n=on(t,\"text\",3,\"\"),r=on(t,\"streaming\",3,!1);const s=ne(()=>Qo(n(),r()));var i=$o();bo(i,()=>h(s),!0),w(e,i),Qe()}var el=Ee('<path fill=\"currentColor\" stroke=\"none\" d=\"M8 1.2c.3 2.9 1.6 4.4 4.6 4.8-3 .4-4.3 1.9-4.6 4.8-.3-2.9-1.6-4.4-4.6-4.8 3-.4 4.3-1.9 4.6-4.8Z\"></path><path fill=\"currentC"
+    s += "olor\" stroke=\"none\" d=\"M12.6 9.6c.15 1.4.8 2.1 2.2 2.3-1.4.2-2.05.9-2.2 2.3-.15-1.4-.8-2.1-2.2-2.3 1.4-.2 2.05-.9 2.2-2.3Z\" opacity=\".75\"></path>',1),tl=Ee('<path d=\"m3.5 8.4 3 3 6-6.6\"></path>'),nl=Ee('<path d=\"m4.5 4.5 7 7m0-7-7 7\"></path>'),rl=Ee('<path d=\"m6 4 4 4-4 4\"></path>'),sl=Ee('<path d=\"M9.2 1.8H4.6c-.7 0-1.3.6-1.3 1.3v9.8c0 .7.6 1.3 1.3 1.3h6.8c.7 0 1"
+    s += ".3-.6 1.3-1.3V5.3L9.2 1.8Z\"></path><path d=\"M9 2v3.5h3.5\"></path>',1),il=Ee('<path d=\"M8 1.6 2.9 3.4v4c0 3.2 2.2 5.8 5.1 7 2.9-1.2 5.1-3.8 5.1-7v-4L8 1.6Z\"></path><path d=\"M8 5v3.4M8 10.6v.1\"></path>',1),al=Ee('<path d=\"M10.6 2.6a1.6 1.6 0 0 1 2.3 2.3L5.6 12.2l-3 .8.8-3 7.2-7.4Z\"></path>'),ol=Ee('<path d=\"M10.2 2.1a3.2 3.2 0 0 0-3.8 4.1L2.3 10.3a1.3 1.3 0 0 0 1.9 1.9l"
+    s += "4.1-4.1a3.2 3.2 0 0 0 4.1-3.8l-2 2-1.8-.3-.3-1.8 1.9-2.1Z\"></path>'),ll=Ee('<circle cx=\"8\" cy=\"8\" r=\"6.2\"></circle><path d=\"M8 4.8v3.6M8 10.9v.1\"></path>',1),ul=Ee('<circle cx=\"8\" cy=\"8\" r=\"6.2\"></circle><path d=\"M8 7.3v3.8M8 4.9v.1\"></path>',1),cl=Ee('<path d=\"M8 3v10m-4-4 4 4 4-4\"></path>'),fl=Ee('<rect x=\"5\" y=\"5\" width=\"8.5\" height=\"8.5\" rx=\"1.6"
+    s += "\"></rect><path d=\"M10.5 3v-.4c0-.9-.7-1.6-1.6-1.6H3.6C2.7 1 2 1.7 2 2.6v5.3c0 .9.7 1.6 1.6 1.6H4\"></path>',1),dl=Ee('<path d=\"M9 2.5h4.5V7M13.3 2.7 7.5 8.5M11.5 9.5v2.9c0 .7-.5 1.1-1.1 1.1H3.6c-.6 0-1.1-.4-1.1-1.1V5.6c0-.6.5-1.1 1.1-1.1h2.9\"></path>'),vl=Ee('<svg viewBox=\"0 0 16 16\" aria-hidden=\"true\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.5\" stroke-li"
+    s += "necap=\"round\" stroke-linejoin=\"round\"><!></svg>');function oe(e,t){let n=on(t,\"size\",3,14);var r=vl(),s=E(r);{var i=m=>{var k=el();w(m,k)},a=m=>{var k=tl();w(m,k)},l=m=>{var k=nl();w(m,k)},o=m=>{var k=rl();w(m,k)},u=m=>{var k=sl();w(m,k)},c=m=>{var k=il();w(m,k)},v=m=>{var k=al();w(m,k)},_=m=>{var k=ol();w(m,k)},d=m=>{var k=ll();w(m,k)},p=m=>{var k=ul();w(m,k)},b=m=>{var "
+    s += "k=cl();w(m,k)},g=m=>{var k=fl();w(m,k)},y=m=>{var k=dl();w(m,k)};L(s,m=>{t.name===\"sparkle\"?m(i):t.name===\"check\"?m(a,1):t.name===\"x\"?m(l,2):t.name===\"chevron\"?m(o,3):t.name===\"file\"?m(u,4):t.name===\"shield\"?m(c,5):t.name===\"edit\"?m(v,6):t.name===\"tools\"?m(_,7):t.name===\"alert\"?m(d,8):t.name===\"info\"?m(p,9):t.name===\"arrow-down\"?m(b,10):t.name===\"copy\"?m"
+    s += "(g,11):t.name===\"external\"&&m(y,12)})}N(()=>{be(r,0,`icon icon-${t.name??\"\"}`),ue(r,\"width\",n()),ue(r,\"height\",n())}),w(e,r)}var hl=M('<span class=\"avatar user\" aria-hidden=\"true\"> </span>'),pl=M('<span class=\"avatar bot\" aria-hidden=\"true\"><!></span>');function As(e,t){Xe(t,!0);let n=on(t,\"role\",3,\"assistant\"),r=on(t,\"name\",3,\"\");const s=ne(()=>(r().tri"
+    s += "m()[0]||\"Y\").toUpperCase());var i=an(),a=Je(i);{var l=u=>{var c=hl(),v=U(c,!0);N(()=>I(v,h(s))),w(u,c)},o=u=>{var c=pl(),v=E(c);oe(v,{name:\"sparkle\",size:12}),w(u,c)};L(a,u=>{n()===\"user\"?u(l):u(o,-1)})}w(e,i),Qe()}function Ms(e){return e=Math.max(0,Math.round(e)),e<1e3?String(e):e<1e4?(e/1e3).toFixed(1).replace(/\\.0$/,\"\")+\"k\":e<1e6?Math.round(e/1e3)+\"k\":(e/1e6).to"
+    s += "Fixed(1).replace(/\\.0$/,\"\")+\"M\"}function _l(e){if(!e)return\"\";const t=[],n=e.estimated?\"~\":\"\";if(e.tokensOut>0&&t.push(\"\\u2193 \"+n+Ms(e.tokensOut)+\" tokens\"),e.tokensIn>0&&t.push(\"\\u2191 \"+Ms(e.tokensIn)+\" in\"),e.tokensPerSecond>0&&t.push(n+(e.tokensPerSecond<10?e.tokensPerSecond.toFixed(1):Math.round(e.tokensPerSecond))+\" tok/s\"),e.elapsedMs>0){const r=e"
+    s += ".elapsedMs/1e3;t.push(r<60?r.toFixed(1)+\"s\":Math.floor(r/60)+\"m \"+Math.round(r%60)+\"s\")}return t.join(\" \\xB7 \")}function Dr(e){const t=String(e||\"\").trim();if(!t||t[0]!==\"{\"&&t[0]!==\"[\")return String(e||\"\");try{return JSON.stringify(JSON.parse(t),null,2)}catch{return String(e)}}const Ts=(e,t=Fs)=>{var n=an(),r=Je(n);{var s=i=>{var a=wl();fn(a,21,t,rr,(l,o)=>{va"
+    s += "r u=an(),c=Je(u);{var v=d=>{var p=gl(),b=U(p);N(()=>{ue(p,\"title\",h(o).name),ue(b,\"src\",h(o).dataUrl),ue(b,\"alt\",h(o).name)}),pe(\"click\",p,()=>K.lightbox={src:h(o).dataUrl,name:h(o).name}),w(d,p)},_=d=>{var p=bl(),b=E(p);oe(b,{name:\"file\",size:13});var g=x(b,2),y=U(g,!0),m=x(g,2);{var k=C=>{var S=ml(),P=U(S,!0);N(()=>I(P,h(o).detail)),w(C,S)};L(m,C=>{h(o).detail&&C(k)"
+    s += "})}N(()=>{ue(p,\"title\",h(o).detail?h(o).name+\" \\u2014 \"+h(o).detail:h(o).name),I(y,h(o).name)}),w(d,p)};L(c,d=>{h(o).kind===\"image\"?d(v):d(_,-1)})}w(l,u)}),w(i,a)};L(r,i=>{t().length&&i(s)})}w(e,n)};var gl=M('<button type=\"button\" class=\"thumb\"><img/></button>'),ml=M('<span class=\"file-detail\"> </span>'),bl=M('<span class=\"file-chip\"><!> <span class=\"file-name\""
+    s += "> </span> <!></span>'),wl=M('<div class=\"attachments\"></div>'),yl=M('<div class=\"user-text\"> </div>'),kl=M('<div class=\"msg user\"><div class=\"msg-head right\"><span class=\"author\"> </span> <!></div> <div class=\"bubble\"><!> <!></div></div>'),xl=M('<button type=\"button\" class=\"icon-btn msg-copy\" title=\"Copy message\"><!></button>'),Sl=M('<div class=\"msg-head\"><!"
+    s += "> <span class=\"author\"> </span> <!></div>'),El=M('<div class=\"stats\"> </div>'),Al=M('<div><!> <div class=\"msg-body\"><!> <!> <!></div></div>'),Ml=M('<div class=\"error-title\"> </div>'),Tl=M('<div class=\"msg error\" role=\"alert\"><!> <div class=\"error-body\"><!> <!></div></div>'),Cl=M(\"<b> </b> \",1),Ol=M('<div><!> <span class=\"note-text\"><!> </span></div>');function"
+    s += " Ll(e,t){Xe(t,!0);const n=ne(()=>_l(t.m.stats));let r=Le(!1);function s(){try{navigator.clipboard&&navigator.clipboard.writeText(t.m.text).catch(()=>{})}catch{}Pe({action:\"copy\",text:t.m.text}),he(r,!0),setTimeout(()=>he(r,!1),1200)}var i=an(),a=Je(i);{var l=v=>{var _=kl(),d=E(_),p=E(d),b=U(p,!0),g=x(p,2);{let S=ne(()=>t.m.author||\"You\");As(g,{role:\"user\",get name(){retur"
+    s += "n h(S)}})}var y=x(d,2),m=E(y);Ts(m,()=>t.m.attachments);var k=x(m,2);{var C=S=>{var P=yl(),R=U(P,!0);N(()=>I(R,t.m.text)),w(S,P)};L(k,S=>{t.m.text&&S(C)})}N(()=>I(b,t.m.author||\"You\")),w(v,_)},o=v=>{var _=Al();let d;var p=E(_);{var b=S=>{var P=Sl(),R=E(P);As(R,{role:\"assistant\"});var Q=x(R,2),$=U(Q,!0),q=x(Q,2);{var A=T=>{var B=xl(),W=E(B);{let J=ne(()=>h(r)?\"check\":\"cop"
+    s += "y\");oe(W,{get name(){return h(J)},size:13})}pe(\"click\",B,s),w(T,B)};L(q,T=>{!t.m.streaming&&t.m.text&&T(A)})}N(()=>I($,t.m.author||\"Assistant\")),w(S,P)};L(p,S=>{t.m.continuation||S(b)})}var g=x(p,2),y=E(g);Ts(y,()=>t.m.attachments);var m=x(y,2);Es(m,{get text(){return t.m.text},get streaming(){return t.m.streaming}});var k=x(m,2);{var C=S=>{var P=El(),R=U(P,!0);N(()=>I(R,h"
+    s += "(n))),w(S,P)};L(k,S=>{h(n)&&S(C)})}N(()=>d=be(_,1,\"msg assistant\",null,d,{streaming:t.m.streaming,continuation:t.m.continuation})),w(v,_)},u=v=>{var _=Tl(),d=E(_);oe(d,{name:\"alert\",size:15});var p=x(d,2),b=E(p);{var g=m=>{var k=Ml(),C=U(k,!0);N(()=>I(C,t.m.author)),w(m,k)};L(b,m=>{t.m.author&&m(g)})}var y=x(b,2);Es(y,{get text(){return t.m.text}}),w(v,_)},c=v=>{var _=Ol(),"
+    s += "d=E(_);oe(d,{name:\"info\",size:12});var p=x(d,2),b=E(p);{var g=m=>{var k=Cl(),C=Je(k),S=U(C,!0),P=x(C,1,!0);P.nodeValue=\" \",N(()=>I(S,t.m.author)),w(m,k)};L(b,m=>{t.m.author&&m(g)})}var y=x(b,1,!0);N(()=>{be(_,1,`msg note ${t.m.role??\"\"}`),I(y,t.m.text)}),w(v,_)};L(a,v=>{t.m.role===\"user\"?v(l):t.m.role===\"assistant\"?v(o,1):t.m.role===\"error\"?v(u,2):v(c,-1)})}w(e,i),Q"
+    s += "e()}cn([\"click\"]);var Cs=M('<span class=\"spinner\"></span>'),jl=M('<span class=\"badge fail\"> </span>'),Pl=M('<button type=\"button\" class=\"tool-group-head\"><span><!></span> <span class=\"tg-label\"><!></span> <!> <span><!></span></button>'),Rl=M('<span class=\"tool-detail\"> </span>'),Nl=M(\"<span><!></span>\"),Il=M('<div class=\"io-label\">Input</div> <pre class=\"io\""
+    s += "> </pre>',1),Fl=M('<div class=\"io-label\">Output</div> <pre class=\"io\"> </pre>',1),Dl=M('<div class=\"tool-io\"><!> <!></div>'),Bl=M('<div><button type=\"button\" class=\"tool-line\"><span class=\"tool-status\"><!></span> <span class=\"tool-verb\"> </span> <!> <!></button> <!></div>'),Wl=M('<div class=\"tool-rows\"></div>'),zl=M(\"<div><!> <!></div>\");function Hl(e,t){Xe(t,"
+    s += "!0);let n=Le(null),r=kt({});const s=ne(()=>t.tools.filter(p=>p.status===\"running\").length),i=ne(()=>t.tools.filter(p=>p.status===\"failed\").length),a=ne(()=>h(n)===null?h(s)>0||t.tools.length<2:h(n));function l(p){const b=String(p).toLowerCase();return b.includes(\"read\")?\"Read\":b.includes(\"check\")?\"Checked\":b.includes(\"propose\")?\"Proposed edits\":b.includes(\"sear"
+    s += "ch\")?\"Searched\":b.includes(\"script\")?\"Ran script\":b.includes(\"render\")?\"Rendered\":b.includes(\"list\")?\"Listed\":p}var o=zl();let u;var c=E(o);{var v=p=>{var b=Pl(),g=E(b);let y;var m=E(g);{var k=W=>{var J=Cs();w(W,J)},C=W=>{oe(W,{name:\"tools\",size:13})};L(m,W=>{h(s)>0?W(k):W(C,-1)})}var S=x(g,2),P=E(S);{var R=W=>{var J=_s();N(()=>I(J,`Running ${h(s)??\"\"} of ${t"
+    s += ".tools.length??\"\"} tools`)),w(W,J)},Q=W=>{var J=_s();N(()=>I(J,`Used ${t.tools.length??\"\"} tools`)),w(W,J)};L(P,W=>{h(s)>0?W(R):W(Q,-1)})}var $=x(S,2);{var q=W=>{var J=jl(),Ae=U(J);N(()=>I(Ae,`${h(i)??\"\"} failed`)),w(W,J)};L($,W=>{h(i)&&W(q)})}var A=x($,2);let T;var B=E(A);oe(B,{name:\"chevron\",size:12}),N(()=>{ue(b,\"aria-expanded\",h(a)),y=be(g,1,\"tg-icon\",null,y,{sp"
+    s += "in:h(s)>0}),T=be(A,1,\"chev\",null,T,{open:h(a)})}),pe(\"click\",b,()=>he(n,!h(a))),w(p,b)};L(c,p=>{t.tools.length>1&&p(v)})}var _=x(c,2);{var d=p=>{var b=Wl();fn(b,21,()=>t.tools,g=>g.id,(g,y)=>{const m=ne(()=>!!(h(y).input||h(y).output)),k=ne(()=>!!r[h(y).id]);var C=Bl(),S=E(C),P=E(S),R=E(P);{var Q=j=>{var ce=Cs();w(j,ce)},$=j=>{oe(j,{name:\"x\",size:12})},q=j=>{oe(j,{name:\""
+    s += "check\",size:12})};L(R,j=>{h(y).status===\"running\"?j(Q):h(y).status===\"failed\"?j($,1):j(q,-1)})}var A=x(P,2),T=U(A,!0),B=x(A,2);{var W=j=>{var ce=Rl(),ze=U(ce,!0);N(()=>{ue(ce,\"title\",h(y).detail),I(ze,h(y).detail)}),w(j,ce)};L(B,j=>{h(y).detail&&j(W)})}var J=x(B,2);{var Ae=j=>{var ce=Nl();let ze;var Me=E(ce);oe(Me,{name:\"chevron\",size:11}),N(()=>ze=be(ce,1,\"chev\",nul"
+    s += "l,ze,{open:h(k)})),w(j,ce)};L(J,j=>{h(m)&&j(Ae)})}var Z=x(S,2);{var le=j=>{var ce=Dl(),ze=E(ce);{var Me=Ne=>{var gt=Il(),zt=x(Je(gt),2),mt=U(zt,!0);N(Tt=>I(mt,Tt),[()=>Dr(h(y).input)]),w(Ne,gt)};L(ze,Ne=>{h(y).input&&Ne(Me)})}var fe=x(ze,2);{var In=Ne=>{var gt=Fl(),zt=x(Je(gt),2),mt=U(zt,!0);N(Tt=>I(mt,Tt),[()=>Dr(h(y).output)]),w(Ne,gt)};L(fe,Ne=>{h(y).output&&Ne(In)})}w(j,ce)"
+    s += "};L(Z,j=>{h(k)&&j(le)})}N(j=>{be(C,1,`tool-row ${h(y).status??\"\"}`),S.disabled=!h(m),ue(S,\"aria-expanded\",h(k)),ue(P,\"title\",h(y).status),I(T,j)},[()=>l(h(y).name)]),pe(\"click\",S,()=>r[h(y).id]=!h(k)),w(g,C)}),w(p,b)};L(_,p=>{h(a)&&p(d)})}N(()=>u=be(o,1,\"tool-group\",null,u,{single:t.tools.length<2})),w(e,o),Qe()}cn([\"click\"]);function ql(e){const t=[];let n=0,r=0,s="
+    s += "0,i=0;const a=String(e||\"\").replace(/\\r\\n?/g,`\n"
+    s += "`).split(`\n"
+    s += "`);a.length&&a[a.length-1]===\"\"&&a.pop();for(const l of a){const o=s>0||i>0,u=/^@@ -(\\d+)(?:,(\\d+))? \\+(\\d+)(?:,(\\d+))? @@(.*)$/.exec(l);if(u||!o){u?(n=+u[1],r=+u[3],s=u[2]===void 0?1:+u[2],i=u[4]===void 0?1:+u[4],t.push({t:\"hunk\",text:l,ctx:u[5].trim()})):l.startsWith(\"\\\\\")&&t.push({t:\"meta\",text:l});continue}const c=l[0];c===\"+\"?(t.push({t:\"add\",o:\"\",n:r+"
+    s += "+,text:l.slice(1)}),i--):c===\"-\"?(t.push({t:\"del\",o:n++,n:\"\",text:l.slice(1)}),s--):c===\"\\\\\"?t.push({t:\"meta\",text:l}):(t.push({t:\"ctx\",o:n++,n:r++,text:l.slice(1)}),s--,i--)}return t}var Ul=M('<div class=\"diff-empty\">No textual preview</div>'),Yl=M('<div class=\"drow hunk\"><span class=\"gut\">&#8943;</span><span class=\"gut\"></span><span class=\"code\"> </spa"
+    s += "n></div>'),Vl=M('<div class=\"drow meta\"><span class=\"gut\"></span><span class=\"gut\"></span><span class=\"code\"> </span></div>'),Gl=M('<div><span class=\"gut\"> </span><span class=\"gut\"> </span><span class=\"code\"><span class=\"sign\"> </span> </span></div>'),Kl=M('<div class=\"diff\" role=\"table\"><div class=\"diff-inner\"></div></div>');function Zl(e,t){Xe(t,!0);cons"
+    s += "t n=ne(()=>ql(t.diff));var r=an(),s=Je(r);{var i=o=>{var u=Ul();w(o,u)},a=ne(()=>!h(n).some(o=>o.t!==\"meta\")),l=o=>{var u=Kl(),c=E(u);fn(c,21,()=>h(n),rr,(v,_)=>{var d=an(),p=Je(d);{var b=m=>{var k=Yl(),C=x(E(k),2),S=U(C,!0);N(()=>I(S,h(_).text)),w(m,k)},g=m=>{var k=Vl(),C=x(E(k),2),S=U(C,!0);N(()=>I(S,h(_).text)),w(m,k)},y=m=>{var k=Gl(),C=E(k),S=U(C,!0),P=x(C),R=U(P,!0),Q=x"
+    s += "(P),$=E(Q),q=U($,!0),A=x($,1,!0);N(()=>{be(k,1,`drow ${h(_).t??\"\"}`),I(S,h(_).o),I(R,h(_).n),I(q,h(_).t===\"add\"?\"+\":h(_).t===\"del\"?\"-\":\" \"),I(A,h(_).text)}),w(m,k)};L(p,m=>{h(_).t===\"hunk\"?m(b):h(_).t===\"meta\"?m(g,1):m(y,-1)})}w(v,d)}),w(o,u)};L(s,o=>{h(a)?o(i):o(l,-1)})}w(e,r),Qe()}var Jl=M(\"<span><!> </span>\");function Ni(e,t){Xe(t,!0);const n=ne(()=>t.outco"
+    s += "me===\"applied\"||t.outcome===\"allowed\"),r=ne(()=>t.outcome?t.outcome[0].toUpperCase()+t.outcome.slice(1):\"\");var s=Jl(),i=E(s);{let l=ne(()=>h(n)?\"check\":\"x\");oe(i,{get name(){return h(l)},size:11})}var a=x(i,1,!0);N(()=>{be(s,1,`badge outcome ${h(n)?\"ok\":t.outcome===\"dismissed\"?\"muted\":\"fail\"}`),I(a,h(r))}),w(e,s),Qe()}var Xl=M('<span class=\"dir\"> </span>'),"
+    s += "Ql=M('<div class=\"file\"><div class=\"file-head\"><button type=\"button\" class=\"file-toggle\"><span><!></span> <span class=\"path\"><span class=\"base\"> </span><!></span></button> <span class=\"counts\"><span class=\"badge add\"> </span><span class=\"badge del\"> </span></span> <button type=\"button\" class=\"link-btn\">Open</button></div> <!></div>'),$l=M('<div class=\"dif"
+    s += "f-empty\">No files</div>'),eu=M('<div class=\"files\"><!> <!></div>'),tu=M('<button type=\"button\" class=\"btn primary\">Apply changes</button>'),nu=M('<div class=\"card-actions\"><!> <button type=\"button\" class=\"btn\">Reject</button></div>'),ru=M('<section><button type=\"button\" class=\"card-head\"><span class=\"card-icon\"><!></span> <span class=\"card-title\"><span clas"
+    s += "s=\"t\"> </span> <span class=\"sub\"> <span class=\"add\"> </span> <span class=\"del\"> </span></span></span> <!> <span><!></span></button> <!> <!></section>');function su(e,t){Xe(t,!0);let n=kt({}),r=Le(!1);const s=ne(()=>t.c.files.reduce((Z,le)=>Z+le.added,0)),i=ne(()=>t.c.files.reduce((Z,le)=>Z+le.removed,0)),a=ne(()=>!!t.c.outcome),l=ne(()=>h(r));gi(()=>{he(r,h(a),!0)});con"
+    s += "st o=Z=>Z.split(/[\\\\/]/).pop(),u=Z=>{const le=Z.split(/[\\\\/]/);return le.pop(),le.join(\"/\")};var c=ru();let v;var _=E(c),d=E(_),p=E(d);oe(p,{name:\"edit\",size:14});var b=x(d,2),g=E(b),y=U(g,!0),m=x(g,2),k=E(m),C=x(k),S=U(C),P=x(C,2),R=U(P),Q=x(b,2);{var $=Z=>{Ni(Z,{get outcome(){return t.c.outcome}})};L(Q,Z=>{t.c.outcome&&Z($)})}var q=x(Q,2);let A;var T=E(q);oe(T,{name:"
+    s += "\"chevron\",size:12});var B=x(_,2);{var W=Z=>{var le=eu(),j=E(le);fn(j,17,()=>t.c.files,rr,(Me,fe,In)=>{const Ne=ne(()=>!n[In]);var gt=Ql(),zt=E(gt),mt=E(zt),Tt=E(mt);let ts;var Ii=E(Tt);oe(Ii,{name:\"chevron\",size:11});var ns=x(Tt,2),rs=E(ns),Fi=U(rs,!0),Di=x(rs);{var Bi=lt=>{var os=Xl(),Vi=U(os,!0);N(Gi=>I(Vi,Gi),[()=>u(h(fe).path)]),w(lt,os)},Wi=ne(()=>u(h(fe).path));L(Di,l"
+    s += "t=>{h(Wi)&&lt(Bi)})}var ss=x(mt,2),is=E(ss),zi=U(is),Hi=x(is),qi=U(Hi),as=x(ss,2),Ui=x(zt,2);{var Yi=lt=>{Zl(lt,{get diff(){return h(fe).diff}})};L(Ui,lt=>{h(Ne)&&lt(Yi)})}N(lt=>{ue(mt,\"aria-expanded\",h(Ne)),ts=be(Tt,1,\"chev\",null,ts,{open:h(Ne)}),ue(ns,\"title\",h(fe).path),I(Fi,lt),I(zi,`+${h(fe).added??\"\"}`),I(qi,`\\u2212${h(fe).removed??\"\"}`),ue(as,\"title\",\"Open "
+    s += "\"+h(fe).path)},[()=>o(h(fe).path)]),pe(\"click\",mt,()=>n[In]=h(Ne)),pe(\"click\",as,()=>Pe({action:\"openFile\",path:h(fe).path})),w(Me,gt)});var ce=x(j,2);{var ze=Me=>{var fe=$l();w(Me,fe)};L(ce,Me=>{t.c.files.length||Me(ze)})}w(Z,le)};L(B,Z=>{h(l)||Z(W)})}var J=x(B,2);{var Ae=Z=>{var le=nu(),j=E(le);{var ce=Me=>{var fe=tu();pe(\"click\",fe,()=>Pe({action:\"approve\",id:t.c."
+    s += "id})),w(Me,fe)};L(j,Me=>{t.c.canApply&&Me(ce)})}var ze=x(j,2);pe(\"click\",ze,()=>Pe({action:\"reject\",id:t.c.id})),w(Z,le)};L(J,Z=>{h(a)||Z(Ae)})}N(()=>{v=be(c,1,\"card proposal\",null,v,{resolved:h(a)}),ue(_,\"aria-expanded\",!h(l)),I(y,t.c.title||\"Proposed changes\"),I(k,`${t.c.files.length??\"\"} ${t.c.files.length===1?\"file\":\"files\"} `),I(S,`+${h(s)??\"\"}`),I(R,`\\u"
+    s += "2212${h(i)??\"\"}`),A=be(q,1,\"chev\",null,A,{open:!h(l)})}),pe(\"click\",_,()=>he(r,!h(r))),w(e,c),Qe()}cn([\"click\"]);var iu=M('<span class=\"sub\">The agent is asking for permission</span>'),au=M('<pre class=\"io details\"> </pre>'),ou=M('<button type=\"button\" class=\"details-toggle\"><span><!></span>Details</button> <!>',1),lu=M('<button type=\"button\" class=\"btn prima"
+    s += "ry amber\">Allow once</button>'),uu=M('<div class=\"card-actions\"><!> <button type=\"button\" class=\"btn\">Deny</button></div>'),cu=M('<section><div class=\"card-head static\"><span class=\"card-icon amber\"><!></span> <span class=\"card-title\"><span class=\"t\"> </span> <!></span> <!></div> <!> <!></section>');function fu(e,t){Xe(t,!0);let n=Le(!0);const r=ne(()=>!!t.c.outc"
+    s += "ome),s=ne(()=>Dr(t.c.details));var i=cu();let a;var l=E(i),o=E(l),u=E(o);oe(u,{name:\"shield\",size:14});var c=x(o,2),v=E(c),_=U(v,!0),d=x(v,2);{var p=S=>{var P=iu();w(S,P)};L(d,S=>{h(r)||S(p)})}var b=x(c,2);{var g=S=>{Ni(S,{get outcome(){return t.c.outcome}})};L(b,S=>{t.c.outcome&&S(g)})}var y=x(l,2);{var m=S=>{var P=ou(),R=Je(P),Q=E(R);let $;var q=E(Q);oe(q,{name:\"chevron\","
+    s += "size:11});var A=x(R,2);{var T=B=>{var W=au(),J=U(W,!0);N(()=>I(J,h(s))),w(B,W)};L(A,B=>{h(n)&&B(T)})}N(()=>{ue(R,\"aria-expanded\",h(n)),$=be(Q,1,\"chev\",null,$,{open:h(n)})}),pe(\"click\",R,()=>he(n,!h(n))),w(S,P)};L(y,S=>{h(s)&&!h(r)&&S(m)})}var k=x(y,2);{var C=S=>{var P=uu(),R=E(P);{var Q=q=>{var A=lu();pe(\"click\",A,()=>Pe({action:\"approve\",id:t.c.id})),w(q,A)};L(R,q=>{"
+    s += "t.c.canAccept&&q(Q)})}var $=x(R,2);pe(\"click\",$,()=>Pe({action:\"reject\",id:t.c.id})),w(S,P)};L(k,S=>{h(r)||S(C)})}N(()=>{a=be(i,1,\"card permission\",null,a,{resolved:h(r)}),I(_,t.c.title)}),w(e,i),Qe()}cn([\"click\"]);Ta();var du=M(\"<h1> </h1>\"),vu=M(\"<p> </p>\"),hu=M('<button type=\"button\" class=\"chip\"> </button>'),pu=M('<div class=\"chips\"></div>'),_u=M('<div cla"
+    s += "ss=\"empty\"><svg class=\"logo\" viewBox=\"0 0 48 48\" aria-hidden=\"true\"><defs><linearGradient id=\"lg\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\"><stop offset=\"0\" stop-color=\"var(--accent)\"></stop><stop offset=\"1\" stop-color=\"var(--accent-2)\"></stop></linearGradient></defs><rect x=\"2\" y=\"2\" width=\"44\" height=\"44\" rx=\"13\" fill=\"url(#lg)\" opacity=\".14\"></rect>"
+    s += "<path fill=\"url(#lg)\" d=\"M24 9c.7 6.9 3.8 10.4 11 11.3-7.2.9-10.3 4.4-11 11.3-.7-6.9-3.8-10.4-11-11.3 7.2-.9 10.3-4.4 11-11.3Z\"></path><path fill=\"url(#lg)\" opacity=\".7\" d=\"M34.5 29c.35 3.2 1.8 4.8 5 5.2-3.2.4-4.65 2-5 5.2-.35-3.2-1.8-4.8-5-5.2 3.2-.4 4.65-2 5-5.2Z\"></path></svg> <!> <!> <!></div>');function gu(e,t){Xe(t,!1),Eo();var n=_u(),r=x(E(n),2);{var s=u=>{var "
+    s += "c=du(),v=U(c,!0);N(()=>I(v,K.empty.title)),w(u,c)};L(r,u=>{K.empty.title&&u(s)})}var i=x(r,2);{var a=u=>{var c=vu(),v=U(c,!0);N(()=>I(v,K.empty.subtitle)),w(u,c)};L(i,u=>{K.empty.subtitle&&u(a)})}var l=x(i,2);{var o=u=>{var c=pu();fn(c,5,()=>K.empty.suggestions,rr,(v,_)=>{var d=hu(),p=U(d,!0);N(()=>I(p,h(_))),pe(\"click\",d,()=>Pe({action:\"suggest\",text:h(_)})),w(v,d)}),w(u,c"
+    s += ")};L(l,u=>{K.empty.suggestions.length&&u(o)})}w(e,n),Qe()}cn([\"click\"]);var mu=M('<div class=\"busy\" role=\"status\" aria-live=\"polite\"><span class=\"avatar bot pulse\"><!></span> <span class=\"shimmer\"> </span> <span class=\"dots\" aria-hidden=\"true\"><i></i><i></i><i></i></span></div>');function bu(e,t){let n=on(t,\"label\",3,\"\");var r=mu(),s=E(r),i=E(s);oe(i,{name:"
+    s += "\"sparkle\",size:12});var a=x(s,2),l=U(a,!0);N(()=>I(l,n()||\"Thinking\\u2026\")),w(e,r)}var Os=M('<div class=\"item\"><!></div>'),wu=M('<button type=\"button\" class=\"jump\"><!>Jump to latest</button>'),yu=M('<div class=\"lightbox\"><img/> <div class=\"lb-name\"> </div> <button type=\"button\" class=\"lb-close\" title=\"Close (Esc)\"><!></button></div>'),ku=M('<main class=\"p"
+    s += "ane\"><div class=\"scroller\"><div class=\"content\"><!> <!> <!></div></div> <!> <!></main> <div id=\"debug\" hidden=\"\"></div>',1);function xu(e,t){Xe(t,!0);const n=ne(()=>{const A=[];for(const T of K.items){const B=A[A.length-1];T.kind===\"tool\"?B&&B.kind===\"tools\"?B.tools.push(T):A.push({kind:\"tools\",key:\"g:\"+T.id,tools:[T]}):A.push({kind:T.kind,key:T.kind[0]+\":\"+T"
+    s += ".id,item:T})}return A});let r,s,i=!0,a=Le(!1);const l=48;function o(){return r.scrollHeight-r.scrollTop-r.clientHeight<=l}function u(A){r.scrollTo({top:r.scrollHeight,behavior:A?\"smooth\":\"auto\"})}function c(){i=o(),i&&he(a,!1)}function v(){i=!0,he(a,!1),u(!0)}function _(A){const T=A.target;if(!(T instanceof Element))return;const B=T.closest(\"a\");if(B){A.preventDefault();c"
+    s += "onst J=B.getAttribute(\"data-href\")||B.getAttribute(\"href\")||\"\";Ri(J)&&Pe({action:\"link\",url:J});return}const W=T.closest(\"[data-copy]\");if(W){const J=W.closest(\".code-block\")?.querySelector(\"code\"),Ae=J?J.textContent:\"\";try{navigator.clipboard&&navigator.clipboard.writeText(Ae).catch(()=>{})}catch{}Pe({action:\"copy\",text:Ae});const Z=W.querySelector(\"span\");"
+    s += "Z&&(Z.textContent=\"Copied\",W.classList.add(\"done\"),setTimeout(()=>{Z.textContent=\"Copy\",W.classList.remove(\"done\")},1200))}}function d(A){A.key===\"Escape\"&&K.lightbox&&(K.lightbox=null)}Ao(()=>{const A=new ResizeObserver(()=>{i?u(!1):he(a,r.scrollHeight-r.scrollTop-r.clientHeight>l)});A.observe(s),A.observe(r),Pe({action:\"ready\"});const T=()=>Pe({action:\"focus\",fo"
+    s += "cused:!0}),B=()=>Pe({action:\"focus\",focused:!1});return window.addEventListener(\"focus\",T),window.addEventListener(\"blur\",B),document.hasFocus()&&T(),()=>{A.disconnect(),window.removeEventListener(\"focus\",T),window.removeEventListener(\"blur\",B)}});var p=ku();or(\"keydown\",Sr,d),or(\"click\",li,_);var b=Je(p),g=E(b),y=E(g),m=E(y);{var k=A=>{gu(A,{})};L(m,A=>{!h(n).len"
+    s += "gth&&!K.busy&&A(k)})}var C=x(m,2);fn(C,17,()=>h(n),A=>A.key,(A,T)=>{var B=Os(),W=E(B);{var J=j=>{Ll(j,{get m(){return h(T).item}})},Ae=j=>{Hl(j,{get tools(){return h(T).tools}})},Z=j=>{su(j,{get c(){return h(T).item}})},le=j=>{fu(j,{get c(){return h(T).item}})};L(W,j=>{h(T).kind===\"message\"?j(J):h(T).kind===\"tools\"?j(Ae,1):h(T).kind===\"proposal\"?j(Z,2):h(T).kind===\"permi"
+    s += "ssion\"&&j(le,3)})}w(A,B)});var S=x(C,2);{var P=A=>{var T=Os(),B=E(T);bu(B,{get label(){return K.busyLabel}}),w(A,T)};L(S,A=>{K.busy&&A(P)})}bs(y,A=>s=A,()=>s),bs(g,A=>r=A,()=>r);var R=x(g,2);{var Q=A=>{var T=wu(),B=E(T);oe(B,{name:\"arrow-down\",size:12}),pe(\"click\",T,v),w(A,T)};L(R,A=>{h(a)&&A(Q)})}var $=x(R,2);{var q=A=>{var T=yu(),B=E(T),W=x(B,2),J=U(W,!0),Ae=x(W,2),Z=E(A"
+    s += "e);oe(Z,{name:\"x\",size:16}),N(()=>{ue(B,\"src\",K.lightbox.src),ue(B,\"alt\",K.lightbox.name),I(J,K.lightbox.name)}),pe(\"click\",T,()=>K.lightbox=null),pe(\"click\",Ae,()=>K.lightbox=null),w(A,T)};L($,A=>{K.lightbox&&A(q)})}or(\"scroll\",g,c),w(e,p),Qe()}cn([\"click\"]);window.chat=Pi;fo(xu,{target:document.getElementById(\"app\")});const hr=location.hash;if(hr===\"#demo\"||"
+    s += "hr===\"#demo-fast\"){const e=hr===\"#demo-fast\";Qi(()=>Promise.resolve().then(()=>Tu),void 0,import.meta.url).then(t=>t.runDemo(window.chat,{fast:e})).catch(t=>console.error(t))}let Br=!1;const ut=e=>Br?Promise.resolve():new Promise(t=>setTimeout(t,e)),Su=\"data:image/svg+xml,\"+encodeURIComponent('<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"320\" height=\"200\" viewBox="
+    s += "\"0 0 320 200\"><defs><linearGradient id=\"g\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\"><stop offset=\"0\" stop-color=\"#7c6cf2\"/><stop offset=\"1\" stop-color=\"#3fb4d8\"/></linearGradient></defs><rect width=\"320\" height=\"200\" fill=\"#f3f3f6\"/><rect width=\"320\" height=\"26\" fill=\"#e3e3e9\"/><circle cx=\"14\" cy=\"13\" r=\"5\" fill=\"#ff5f57\"/><circle cx=\"30\" cy=\"13\" "
+    s += "r=\"5\" fill=\"#febc2e\"/><circle cx=\"46\" cy=\"13\" r=\"5\" fill=\"#28c840\"/><rect x=\"14\" y=\"40\" width=\"120\" height=\"146\" rx=\"6\" fill=\"#fff\"/><rect x=\"146\" y=\"40\" width=\"160\" height=\"70\" rx=\"6\" fill=\"url(#g)\"/><rect x=\"146\" y=\"120\" width=\"160\" height=\"12\" rx=\"4\" fill=\"#d6d6de\"/><rect x=\"146\" y=\"140\" width=\"110\" height=\"12\" rx=\"4\""
+    s += " fill=\"#d6d6de\"/><rect x=\"146\" y=\"164\" width=\"64\" height=\"22\" rx=\"6\" fill=\"#7c6cf2\"/><rect x=\"24\" y=\"52\" width=\"90\" height=\"8\" rx=\"3\" fill=\"#cfcfd8\"/><rect x=\"24\" y=\"68\" width=\"70\" height=\"8\" rx=\"3\" fill=\"#cfcfd8\"/><rect x=\"24\" y=\"84\" width=\"96\" height=\"8\" rx=\"3\" fill=\"#cfcfd8\"/></svg>'),Ls=`I looked at \\`SettingsWindow.bui\\` "
+    s += "and the screenshot. The layout breaks because the **Save** button is anchored to the window instead of the footer stack, so it overlaps the list when the window gets narrower than ~420px.\n"
+    s += "\n"
+    s += "## What's going on\n"
+    s += "\n"
+    s += "1. \\`FooterStack\\` uses a fixed \\`Width\\`, so it never shrinks.\n"
+    s += "2. \\`SaveButton.Left\\` is computed once in \\`Opening\\` and never updated.\n"
+    s += "   - Resizing doesn't re-run that code.\n"
+    s += "   - On Windows the DPI scale makes it worse.\n"
+    s += "3. The list has no bottom inset, so the last row hides under the footer.\n"
+    s += "\n"
+    s += "> Tip: anchors are cheaper than recomputing frames in \\`Resized\\` - see the [layout guide](https://docs.example.com/buoy/layout).\n"
+    s += "\n"
+    s += "## The fix\n"
+    s += "\n"
+    s += "Anchor the footer to the bottom edge and let the button follow it:\n"
+    s += "\n"
+    s += "\\`\\`\\`buoy\n"
+    s += "' Keep the footer pinned and let the button float right.\n"
+    s += "Public Sub LayoutFooter()\n"
+    s += "    FooterStack.Anchors = Anchor.Left Or Anchor.Right Or Anchor.Bottom\n"
+    s += "    Dim inset As Integer = 12\n"
+    s += "    SaveButton.Left = FooterStack.Width - SaveButton.Width - inset\n"
+    s += "    If SaveButton.Left < inset Then\n"
+    s += "        SaveButton.Left = inset\n"
+    s += "    End If\n"
+    s += "    Return\n"
+    s += "End Sub\n"
+    s += "\\`\\`\\`\n"
+    s += "\n"
+    s += "The project settings stay the same, but I'd bump the minimum size:\n"
+    s += "\n"
+    s += "\\`\\`\\`json\n"
+    s += "{ \"window\": { \"minWidth\": 360, \"minHeight\": 280, \"resizable\": true } }\n"
+    s += "\\`\\`\\`\n"
+    s += "\n"
+    s += "| Width | Before | After |\n"
+    s += "| --- | :---: | ---: |\n"
+    s += "| 600px | OK | OK |\n"
+    s += "| 420px | Overlap | OK |\n"
+    s += "| 360px | Clipped | OK |\n"
+    s += "\n"
+    s += "You can verify with \\`buoy SettingsWindow.bui --check\\`, then run:\n"
+    s += "\n"
+    s += "\\`\\`\\`bash\n"
+    s += "# rebuild and launch\n"
+    s += "buoy main.bui -o app && ./app --window settings\n"
+    s += "\\`\\`\\`\n"
+    s += "\n"
+    s += "I'll propose the edits now.`,Eu=`--- a/ui/SettingsWindow.bui\n"
+    s += "+++ b/ui/SettingsWindow.bui\n"
+    s += "@@ -12,8 +12,9 @@ Public Class SettingsWindow Inherits Window\n"
+    s += "     Public Sub Opening()\n"
+    s += "         Title = \"Settings\"\n"
+    s += "-        FooterStack.Width = 420\n"
+    s += "-        SaveButton.Left = 320\n"
+    s += "+        FooterStack.Anchors = Anchor.Left Or Anchor.Right Or Anchor.Bottom\n"
+    s += "+        LayoutFooter()\n"
+    s += "         OptionsList.BottomInset = FooterStack.Height\n"
+    s += "+        MinimumWidth = 360\n"
+    s += "     End Sub\n"
+    s += " \n"
+    s += "     Public Sub Resized()\n"
+    s += "@@ -48,4 +49,13 @@ Public Class SettingsWindow Inherits Window\n"
+    s += "         Return True\n"
+    s += "     End Function\n"
+    s += " \n"
+    s += "+    ' Keep the footer pinned and let the button float right.\n"
+    s += "+    Public Sub LayoutFooter()\n"
+    s += "+        Dim inset As Integer = 12\n"
+    s += "+        SaveButton.Left = FooterStack.Width - SaveButton.Width - inset\n"
+    s += "+        If SaveButton.Left < inset Then\n"
+    s += "+            SaveButton.Left = inset\n"
+    s += "+        End If\n"
+    s += "+    End Sub\n"
+    s += "+\n"
+    s += " End Class\n"
+    s += "\\\\ No newline at end of file`,Au=`--- a/project.json\n"
+    s += "+++ b/project.json\n"
+    s += "@@ -3,7 +3,7 @@\n"
+    s += "   \"version\": \"1.4.0\",\n"
+    s += "   \"window\": {\n"
+    s += "-    \"minWidth\": 420,\n"
+    s += "-    \"minHeight\": 240,\n"
+    s += "+    \"minWidth\": 360,\n"
+    s += "+    \"minHeight\": 280,\n"
+    s += "     \"resizable\": true\n"
+    s += "   },\n"
+    s += "   \"targets\": [\"macos\", \"windows\", \"linux\"]`;async function Mu(e,t={}){Br=!!t.fast,e.reset(),e.setEmpty({title:\"Buoy Studio agent\",subtitle:\"Ask about your project, request a change, or start from a suggestion.\",suggestions:[\"Explain the selected file\",\"Fix the failing --check errors\",\"Add a dark-mode toggle to Settings\"]}),await ut(1400),e.addMessage({id:\"n1"
+    s += "\",role:\"notice\",author:\"Studio\",text:\"Context: SettingsWindow.bui, project.json\"}),e.addMessage({id:\"u1\",role:\"user\",author:\"You\",text:\"The Save button overlaps the options list when I make the settings window narrow. Can you fix the layout?\",attachments:[{name:\"settings-narrow.png\",kind:\"image\",dataUrl:Su},{name:\"SettingsWindow.bui\",kind:\"file\",detail:\""
+    s += "ui/ \\xB7 rev 14\"}]}),e.setBusy({busy:!0,label:\"Thinking\\u2026\"}),await ut(900),e.setBusy({busy:!0,label:\"Reading project\\u2026\"}),e.upsertTool({id:\"t1\",name:\"read_project_item\",status:\"running\",detail:\"ui/SettingsWindow.bui\",input:'{\"id\":\"ui/SettingsWindow.bui\",\"revision\":14}'}),await ut(500),e.upsertTool({id:\"t1\",status:\"complete\",output:`Public Class"
+    s += " SettingsWindow Inherits Window\n"
+    s += "  ...\n"
+    s += "(212 lines)`}),e.upsertTool({id:\"t2\",name:\"search_project\",status:\"running\",detail:'\"SaveButton.Left\"',input:'{\"query\":\"SaveButton.Left\",\"regex\":false}'}),await ut(600),e.upsertTool({id:\"t2\",status:\"complete\",output:'{\"matches\":[{\"path\":\"ui/SettingsWindow.bui\",\"line\":15},{\"path\":\"ui/SettingsWindow.bui\",\"line\":31}]}'}),e.upsertTool({id:\"t3\",name"
+    s += ":\"check_file\",status:\"running\",detail:\"ui/Legacy.bui\",input:'{\"path\":\"ui/Legacy.bui\",\"target\":\"x86_64-pc-windows-msvc\"}'}),await ut(700),e.upsertTool({id:\"t3\",status:\"failed\",output:\"E214: ui/Legacy.bui:8:5 unknown identifier 'OldLayout'\"}),e.upsertTool({id:\"t4\",name:\"list_items\",status:\"running\",detail:\"ui/\"}),await ut(350),e.upsertTool({id:\"t4\",s"
+    s += "tatus:\"complete\",output:'[\"ui/SettingsWindow.bui\",\"ui/MainWindow.bui\",\"ui/Legacy.bui\"]'}),e.setBusy({busy:!1}),e.addMessage({id:\"a1\",role:\"assistant\",author:\"Claude\",text:\"\"});const n=performance.now();let r=0,s=0;for(;r<Ls.length;){const a=Br?400:2+Math.floor(Math.random()*6);if(e.appendDelta({id:\"a1\",text:Ls.slice(r,r+a)}),r+=a,s+=1,s%4===0){const l=performa"
+    s += "nce.now()-n;e.setStats({id:\"a1\",tokensOut:s,tokensIn:3412,tokensPerSecond:s/Math.max(l/1e3,.05),elapsedMs:l,estimated:!0})}await ut(14)}e.finishMessage({id:\"a1\"});const i=performance.now()-n;e.setStats({id:\"a1\",tokensOut:s,tokensIn:3412,tokensPerSecond:s/(i/1e3),elapsedMs:i,estimated:!1}),e.setBusy({busy:!0,label:\"Preparing edits\\u2026\"}),e.upsertTool({id:\"t5\",name:"
+    s += "\"propose_edits\",status:\"running\",detail:\"2 files\",input:'{\"files\":[\"ui/SettingsWindow.bui\",\"project.json\"]}'}),await ut(800),e.upsertTool({id:\"t5\",status:\"complete\",output:'{\"proposal\":\"p1\"}'}),e.showProposal({id:\"p1\",title:\"Pin the settings footer\",canApply:!0,files:[{path:\"ui/SettingsWindow.bui\",revision:\"14\",added:12,removed:2,diff:Eu},{path:\"pro"
+    s += "ject.json\",revision:\"3\",added:2,removed:2,diff:Au}]}),await ut(500),e.showPermission({id:\"perm1\",title:'Run \"buoy --check\" on 2 files',canAccept:!0,details:'{\"tool\":\"run_script\",\"command\":\"buoy ui/SettingsWindow.bui --check --diagnostic-format json\",\"cwd\":\"/projects/settings-demo\",\"timeoutMs\":30000}'}),e.setBusy({busy:!0,label:\"Waiting for approval\"}),win"
+    s += "dow.chatDemoResolve=()=>{e.resolveCard({id:\"perm1\",outcome:\"allowed\"}),e.resolveCard({id:\"p1\",outcome:\"applied\"}),e.setBusy({busy:!1})}}const Tu=Object.freeze(Object.defineProperty({__proto__:null,runDemo:Mu},Symbol.toStringTag,{value:\"Module\"}));</script>\n"
+    s += "    <style rel=\"stylesheet\" crossorigin>:root{--bg: #ffffff;--bg-2: #f6f6f8;--bg-3: #eeeef2;--fg: #1f2328;--fg-2: #4b515a;--muted: #6e7681;--border: #e3e4e8;--border-2: #d3d5db;--accent: #7c6cf2;--accent-2: #b26cf2;--accent-fg: #5b4bd6;--accent-tint: rgba(124, 108, 242, .09);--accent-tint-2: rgba(124, 108, 242, .18);--ok: #1a7f37;--ok-tint: rgba(46, 160, 67, .12);--bad: #cf22"
+    s += "2e;--bad-tint: rgba(207, 34, 46, .09);--amber: #b76e00;--amber-solid: #d18a00;--amber-tint: rgba(210, 140, 0, .1);--diff-add: rgba(46, 160, 67, .13);--diff-add-gut: rgba(46, 160, 67, .22);--diff-del: rgba(207, 34, 46, .1);--diff-del-gut: rgba(207, 34, 46, .18);--code-bg: #f6f7f9;--shadow: 0 1px 2px rgba(16, 18, 27, .05), 0 4px 14px rgba(16, 18, 27, .06);--tk-kw: #8a3ffc;--tk-s:"
+    s += " #0a7c45;--tk-c: #8b939d;--tk-n: #b15c00;--tk-t: #0b62c4;--tk-f: #6f42c1;--tk-l: #c2185b;--sans: -apple-system, BlinkMacSystemFont, \"Segoe UI\", Cantarell, \"Noto Sans\", sans-serif;--mono: ui-monospace, \"SF Mono\", \"Cascadia Code\", \"JetBrains Mono\", Menlo, Consolas, monospace;color-scheme:light}@media(prefers-color-scheme:dark){:root:not([data-theme=light]){--bg: #1e1e1e"
+    s += ";--bg-2: #252526;--bg-3: #2d2d30;--fg: #e3e3e6;--fg-2: #bdbdc3;--muted: #8f9099;--border: #333338;--border-2: #45454c;--accent: #9d8fff;--accent-2: #d08fff;--accent-fg: #b4a9ff;--accent-tint: rgba(157, 143, 255, .12);--accent-tint-2: rgba(157, 143, 255, .24);--ok: #4fc26b;--ok-tint: rgba(79, 194, 107, .15);--bad: #f47067;--bad-tint: rgba(244, 112, 103, .12);--amber: #e3b341;--a"
+    s += "mber-solid: #d29922;--amber-tint: rgba(227, 179, 65, .11);--diff-add: rgba(46, 160, 67, .17);--diff-add-gut: rgba(46, 160, 67, .28);--diff-del: rgba(248, 81, 73, .15);--diff-del-gut: rgba(248, 81, 73, .26);--code-bg: #181818;--shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 6px 18px rgba(0, 0, 0, .25);--tk-kw: #c586c0;--tk-s: #ce9178;--tk-c: #6a9955;--tk-n: #b5cea8;--tk-t: #4ec9b0;--tk-"
+    s += "f: #dcdcaa;--tk-l: #569cd6;color-scheme:dark}}:root[data-theme=dark]{--bg: #1e1e1e;--bg-2: #252526;--bg-3: #2d2d30;--fg: #e3e3e6;--fg-2: #bdbdc3;--muted: #8f9099;--border: #333338;--border-2: #45454c;--accent: #9d8fff;--accent-2: #d08fff;--accent-fg: #b4a9ff;--accent-tint: rgba(157, 143, 255, .12);--accent-tint-2: rgba(157, 143, 255, .24);--ok: #4fc26b;--ok-tint: rgba(79, 194, "
+    s += "107, .15);--bad: #f47067;--bad-tint: rgba(244, 112, 103, .12);--amber: #e3b341;--amber-solid: #d29922;--amber-tint: rgba(227, 179, 65, .11);--diff-add: rgba(46, 160, 67, .17);--diff-add-gut: rgba(46, 160, 67, .28);--diff-del: rgba(248, 81, 73, .15);--diff-del-gut: rgba(248, 81, 73, .26);--code-bg: #181818;--shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 6px 18px rgba(0, 0, 0, .25);--tk"
+    s += "-kw: #c586c0;--tk-s: #ce9178;--tk-c: #6a9955;--tk-n: #b5cea8;--tk-t: #4ec9b0;--tk-f: #dcdcaa;--tk-l: #569cd6;color-scheme:dark}*,*:before,*:after{box-sizing:border-box}html,body,#app{height:100%;margin:0}body{background:var(--bg);color:var(--fg);font:13px/1.55 var(--sans);-webkit-font-smoothing:antialiased;overflow:hidden}button{font:inherit;color:inherit}::selection{background"
+    s += ":var(--accent-tint-2)}.pane{position:relative;height:100%;display:flex;flex-direction:column;min-width:0}.scroller{flex:1;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain}.content{padding:14px 12px 18px;display:flex;flex-direction:column;gap:14px;min-width:0;max-width:820px;margin:0 auto}.item{min-width:0;animation:rise .22s ease-out both}@keyframes rise{0%{opacity"
+    s += ":0;transform:translateY(4px)}to{opacity:1;transform:none}}*{scrollbar-width:thin;scrollbar-color:var(--border-2) transparent}::-webkit-scrollbar{width:10px;height:10px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:var(--border-2);border-radius:10px;border:3px solid transparent;background-clip:content-box}::-webkit-scrollbar-thumb:hover{ba"
+    s += "ckground-color:var(--muted)}::-webkit-scrollbar-corner{background:transparent}.icon{flex:none;display:block}.empty{display:flex;flex-direction:column;align-items:center;text-align:center;padding:12vh 8px 24px;gap:6px}.empty .logo{width:48px;height:48px;margin-bottom:8px}.empty h1{font-size:16px;font-weight:600;margin:0;letter-spacing:-.01em}.empty p{margin:0;color:var(--muted);"
+    s += "max-width:300px}.chips{display:flex;flex-direction:column;gap:6px;margin-top:16px;width:100%;max-width:320px}.chip{text-align:left;padding:8px 11px;border:1px solid var(--border);border-radius:9px;background:var(--bg-2);cursor:pointer;color:var(--fg-2);transition:border-color .15s,background .15s,color .15s}.chip:hover{border-color:var(--accent);background:var(--accent-tint);co"
+    s += "lor:var(--fg)}.msg-head{display:flex;align-items:center;gap:7px;margin-bottom:5px;min-height:20px}.msg-head.right{justify-content:flex-end}.author{font-weight:600;font-size:12px;color:var(--fg-2)}.avatar{flex:none;width:20px;height:20px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:10.5px;font-weight:700}.avatar.bot{color:#fff;backgro"
+    s += "und:linear-gradient(135deg,var(--accent),var(--accent-2))}.avatar.user{background:var(--bg-3);color:var(--fg-2);border:1px solid var(--border)}.icon-btn{margin-left:auto;border:0;background:transparent;color:var(--muted);padding:3px;border-radius:5px;cursor:pointer;opacity:0;transition:opacity .15s}.msg:hover .icon-btn,.icon-btn:focus-visible{opacity:1}.icon-btn:hover{backgroun"
+    s += "d:var(--bg-3);color:var(--fg)}.msg.user{display:flex;flex-direction:column;align-items:flex-end;padding-left:10%}.bubble{background:var(--accent-tint);border:1px solid var(--accent-tint-2);border-radius:10px 10px 4px;padding:8px 11px;max-width:100%;min-width:0}.user-text{white-space:pre-wrap;overflow-wrap:anywhere}.bubble .attachments+.user-text{margin-top:7px}.attachments{disp"
+    s += "lay:flex;flex-wrap:wrap;gap:6px}.msg.user .attachments{justify-content:flex-end}.msg-body>.attachments{margin-bottom:8px}.thumb{padding:0;border:1px solid var(--border);border-radius:8px;overflow:hidden;cursor:zoom-in;background:var(--bg-2);width:72px;height:72px}.thumb img{width:100%;height:100%;object-fit:cover;display:block}.thumb:hover{border-color:var(--accent)}.file-chip{"
+    s += "display:inline-flex;align-items:center;gap:6px;max-width:100%;min-width:0;padding:4px 9px 4px 7px;border:1px solid var(--border);border-radius:7px;background:var(--bg);font-size:12px;color:var(--accent-fg)}.file-name{color:var(--fg);font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}.file-detail{color:var(--muted);font-family:var(--mono);font-"
+    s += "size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex-shrink:1000;min-width:0}.msg-body{padding-left:27px;min-width:0}@media(max-width:300px){.msg-body{padding-left:0}}.stats{margin-top:6px;font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums}.msg.error{display:flex;gap:9px;padding:9px 11px;border-radius:9px;background:var(--bad-tint);border:1p"
+    s += "x solid color-mix(in srgb,var(--bad) 30%,transparent);color:var(--fg)}.msg.error>.icon{color:var(--bad);margin-top:2px}.error-body{min-width:0;flex:1}.error-title{font-weight:600;color:var(--bad);margin-bottom:2px}.msg.note{display:flex;align-items:flex-start;gap:6px;justify-content:center;color:var(--muted);font-size:11.5px;padding:0 8px;text-align:center}.msg.note .icon{margi"
+    s += "n-top:3px;opacity:.8}.note-text{overflow-wrap:anywhere}.msg.note b{font-weight:600;color:var(--fg-2)}.md{overflow-wrap:anywhere;min-width:0}.md>:first-child{margin-top:0}.md>:last-child{margin-bottom:0}.md p{margin:0 0 9px}.md h1,.md h2,.md h3,.md h4,.md h5,.md h6{margin:15px 0 7px;line-height:1.3;font-weight:600;letter-spacing:-.005em}.md h1{font-size:16px}.md h2{font-size:15p"
+    s += "x}.md h3{font-size:14px}.md h4,.md h5,.md h6{font-size:13px}.md ul,.md ol{margin:0 0 9px;padding-left:20px}.md li{margin:2px 0}.md li>ul,.md li>ol{margin:2px 0}.md li::marker{color:var(--muted)}.md li.task-item{list-style:none;margin-left:-18px}.task{display:inline-block;width:12px;height:12px;border:1.5px solid var(--border-2);border-radius:3px;margin-right:6px;vertical-align:"
+    s += "-1px}.task.done{background:var(--accent);border-color:var(--accent)}.md blockquote{margin:0 0 9px;padding:2px 0 2px 11px;border-left:3px solid var(--border-2);color:var(--fg-2)}.md hr{border:0;border-top:1px solid var(--border);margin:14px 0}.md a{color:var(--accent-fg);text-decoration:none;border-bottom:1px solid var(--accent-tint-2);cursor:pointer}.md a:hover{border-bottom-co"
+    s += "lor:var(--accent-fg)}.md strong{font-weight:600}.md del{color:var(--muted)}.md :not(pre)>code{font-family:var(--mono);font-size:.88em;padding:1px 5px;border-radius:5px;background:var(--bg-3);border:1px solid var(--border);overflow-wrap:anywhere}.table-wrap{overflow-x:auto;margin:0 0 10px;border:1px solid var(--border);border-radius:8px}.md table{border-collapse:collapse;width:1"
+    s += "00%;font-size:12px}.md th,.md td{padding:5px 9px;text-align:left;border-bottom:1px solid var(--border);vertical-align:top}.md th{background:var(--bg-2);font-weight:600;white-space:nowrap}.md tr:last-child td{border-bottom:0}.md tbody tr:nth-child(2n) td{background:color-mix(in srgb,var(--bg-2) 50%,transparent)}.code-block{margin:0 0 10px;border:1px solid var(--border);border-ra"
+    s += "dius:8px;background:var(--code-bg);overflow:hidden}.code-head{display:flex;align-items:center;justify-content:space-between;padding:3px 4px 3px 10px;border-bottom:1px solid var(--border);background:var(--bg-2)}.code-lang{font-size:11px;color:var(--muted);font-family:var(--mono);text-transform:lowercase}.code-copy{display:inline-flex;align-items:center;gap:4px;border:0;backgroun"
+    s += "d:transparent;color:var(--muted);font-size:11px;padding:2px 6px;border-radius:5px;cursor:pointer}.code-copy svg{width:12px;height:12px;fill:none;stroke:currentColor;stroke-width:1.5}.code-copy:hover{background:var(--bg-3);color:var(--fg)}.code-copy.done{color:var(--ok)}.code-block pre{margin:0;padding:9px 11px;overflow-x:auto;font:12px/1.5 var(--mono);tab-size:4}.code-block cod"
+    s += "e{font-family:inherit;white-space:pre;overflow-wrap:normal}.tk-kw{color:var(--tk-kw)}.tk-s{color:var(--tk-s)}.tk-c{color:var(--tk-c);font-style:italic}.tk-n{color:var(--tk-n)}.tk-t{color:var(--tk-t)}.tk-f{color:var(--tk-f)}.tk-l{color:var(--tk-l)}.tk-k{color:var(--tk-t)}.tk-v{color:var(--tk-n)}.caret{display:inline-block;width:7px;height:1.05em;margin-left:2px;vertical-align:-."
+    s += "17em;border-radius:1.5px;background:var(--accent);animation:blink 1s steps(2,start) infinite}@keyframes blink{to{visibility:hidden}}.tool-group{border:1px solid var(--border);border-radius:9px;background:var(--bg-2);overflow:hidden}.tool-group.single{background:transparent;border-color:transparent}.tool-group.single .tool-rows{padding:0}.tool-group-head,.tool-line{display:flex;"
+    s += "align-items:center;gap:7px;width:100%;border:0;background:transparent;text-align:left;cursor:pointer;min-width:0}.tool-group-head{padding:6px 9px;color:var(--fg-2);font-size:12px;font-weight:500}.tool-group-head:hover{background:var(--bg-3)}.tg-icon{color:var(--muted);display:inline-flex}.tg-label{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.too"
+    s += "l-rows{display:flex;flex-direction:column;padding:2px 4px 4px;border-top:1px solid var(--border)}.tool-group.single .tool-rows{border-top:0}.tool-line{padding:3px 5px;border-radius:6px;font-size:12px;color:var(--fg-2)}.tool-line:hover:not(:disabled){background:var(--bg-3)}.tool-line:disabled{cursor:default}.tool-status{width:16px;height:16px;display:inline-flex;align-items:cent"
+    s += "er;justify-content:center;flex:none;border-radius:50%}.tool-row.complete .tool-status{color:var(--ok)}.tool-row.failed .tool-status{color:#fff;background:var(--bad)}.tool-row.failed .tool-verb{color:var(--bad)}.tool-verb{font-weight:500;white-space:nowrap;flex:none}.tool-detail{color:var(--muted);font-family:var(--mono);font-size:11.5px;overflow:hidden;text-overflow:ellipsis;wh"
+    s += "ite-space:nowrap;min-width:0;flex:1}.tool-line .chev{margin-left:auto}.tool-io{padding:2px 6px 6px 28px}.io-label{font-size:10.5px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin:5px 0 3px;font-weight:600}pre.io{margin:0;padding:7px 9px;background:var(--code-bg);border:1px solid var(--border);border-radius:6px;font:11.5px/1.45 var(--mono);max-height:220p"
+    s += "x;overflow:auto;white-space:pre;color:var(--fg-2)}.chev{display:inline-flex;color:var(--muted);transition:transform .15s;flex:none}.chev.open{transform:rotate(90deg)}.spinner{width:12px;height:12px;border-radius:50%;border:1.6px solid var(--border-2);border-top-color:var(--accent);animation:spin .75s linear infinite;display:inline-block}@keyframes spin{to{transform:rotate(360de"
+    s += "g)}}.badge{display:inline-flex;align-items:center;gap:3px;font-size:11px;font-weight:600;line-height:1;padding:3px 6px;border-radius:20px;white-space:nowrap;font-variant-numeric:tabular-nums}.badge.add,.badge.ok{color:var(--ok);background:var(--ok-tint)}.badge.del,.badge.fail{color:var(--bad);background:var(--bad-tint)}.badge.muted{color:var(--muted);background:var(--bg-3)}.car"
+    s += "d{border:1px solid var(--border);border-radius:10px;background:var(--bg);box-shadow:var(--shadow);overflow:hidden}.card.permission{border-color:color-mix(in srgb,var(--amber-solid) 45%,var(--border));box-shadow:var(--shadow),inset 3px 0 0 var(--amber-solid)}.card.resolved{box-shadow:none}.card.permission.resolved{box-shadow:inset 3px 0 0 var(--border-2);border-color:var(--borde"
+    s += "r)}.card-head{display:flex;align-items:center;gap:9px;width:100%;padding:9px 11px;border:0;background:transparent;text-align:left;cursor:pointer;min-width:0}.card-head.static{cursor:default}button.card-head:hover{background:var(--bg-2)}.card-icon{width:26px;height:26px;border-radius:7px;display:inline-flex;align-items:center;justify-content:center;flex:none;color:var(--accent-f"
+    s += "g);background:var(--accent-tint)}.card-icon.amber{color:var(--amber);background:var(--amber-tint)}.card-title{display:flex;flex-direction:column;min-width:0;flex:1}.card-title .t{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.card-title .sub{font-size:11.5px;color:var(--muted)}.sub .add{color:var(--ok);font-weight:600}.sub .del{color:var(--bad);font-"
+    s += "weight:600}.card-actions{display:flex;gap:6px;padding:9px 11px;border-top:1px solid var(--border);background:var(--bg-2);flex-wrap:wrap}.btn{border:1px solid var(--border-2);background:var(--bg);color:var(--fg);padding:5px 12px;border-radius:7px;cursor:pointer;font-weight:500;font-size:12.5px;transition:background .15s,border-color .15s,filter .15s}.btn:hover{background:var(--b"
+    s += "g-3)}.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}:root[data-theme=dark] .btn.primary{color:#16131f}@media(prefers-color-scheme:dark){:root:not([data-theme=light]) .btn.primary{color:#16131f}}.btn.primary:hover{filter:brightness(1.07);background:var(--accent)}.btn.primary.amber{background:var(--amber-solid);border-color:var(--amber-solid);color:#1"
+    s += "d1500}.btn:focus-visible,.chip:focus-visible,.link-btn:focus-visible{outline:2px solid var(--accent);outline-offset:1px}.files{border-top:1px solid var(--border)}.file+.file{border-top:1px solid var(--border)}.file-head{display:flex;align-items:center;gap:6px;padding:5px 8px 5px 6px;min-width:0;background:var(--bg-2)}.file-toggle{display:flex;align-items:center;gap:5px;flex:1;m"
+    s += "in-width:0;border:0;background:transparent;padding:2px;cursor:pointer;text-align:left}.path{display:flex;align-items:baseline;gap:6px;min-width:0;font-size:12px}.path .base{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:none;max-width:100%}.path .dir{color:var(--muted);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;direc"
+    s += "tion:rtl;min-width:0}.counts{display:inline-flex;gap:3px;flex:none}.link-btn{border:0;background:transparent;color:var(--accent-fg);cursor:pointer;font-size:12px;padding:2px 4px;border-radius:5px;flex:none}.link-btn:hover{background:var(--accent-tint)}.diff{overflow:auto;max-height:380px;font:11.5px/1.55 var(--mono);background:var(--bg)}.diff-inner{min-width:max-content}.drow{d"
+    s += "isplay:flex;white-space:pre}.drow .gut{position:sticky;flex:none;width:34px;padding:0 5px;text-align:right;color:var(--muted);background:var(--bg);-webkit-user-select:none;user-select:none;font-variant-numeric:tabular-nums;opacity:.85}.drow .gut:nth-child(1){left:0}.drow .gut:nth-child(2){left:34px;border-right:1px solid var(--border)}.drow .code{padding:0 12px 0 6px;flex:1}.si"
+    s += "gn{display:inline-block;width:12px;color:var(--muted);-webkit-user-select:none;user-select:none}.drow.add .code{background:var(--diff-add)}.drow.add .sign{color:var(--ok)}.drow.del .code{background:var(--diff-del)}.drow.del .sign{color:var(--bad)}.drow.add .gut,.drow.del .gut{background:var(--bg);background-image:linear-gradient(var(--diff-add-gut),var(--diff-add-gut))}.drow.de"
+    s += "l .gut{background-image:linear-gradient(var(--diff-del-gut),var(--diff-del-gut))}.drow.hunk{color:var(--accent-fg);background:var(--accent-tint)}.drow.hunk .gut{background:var(--bg);background-image:linear-gradient(var(--accent-tint),var(--accent-tint))}.drow.hunk:not(:first-child){border-top:1px solid var(--border)}.drow.hunk .code{padding:2px 12px 2px 6px;font-size:11px}.drow"
+    s += ".meta{color:var(--muted);font-style:italic}.diff-empty{padding:10px 12px;color:var(--muted);font-size:12px;font-style:italic}.details-toggle{display:flex;align-items:center;gap:5px;border:0;background:transparent;color:var(--muted);font-size:12px;padding:0 11px 6px 46px;cursor:pointer}.details-toggle:hover{color:var(--fg)}pre.details{margin:0 11px 10px 46px}@media(max-width:320"
+    s += "px){.details-toggle{padding-left:11px}pre.details{margin-left:11px}}.busy{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:12.5px}.avatar.pulse{animation:pulse 1.6s ease-in-out infinite}@keyframes pulse{50%{transform:scale(.88);opacity:.75}}.shimmer{background:linear-gradient(90deg,var(--muted) 0%,var(--muted) 35%,var(--fg) 50%,var(--muted) 65%,var(--muted) "
+    s += "100%);background-size:250% 100%;-webkit-background-clip:text;background-clip:text;color:transparent;animation:shimmer 2s linear infinite;font-weight:500}@keyframes shimmer{0%{background-position:100% 0}to{background-position:-150% 0}}.dots{display:inline-flex;gap:3px}.dots i{width:4px;height:4px;border-radius:50%;background:var(--muted);animation:dot 1.2s infinite ease-in-out}."
+    s += "dots i:nth-child(2){animation-delay:.15s}.dots i:nth-child(3){animation-delay:.3s}@keyframes dot{0%,80%,to{opacity:.25;transform:translateY(0)}40%{opacity:1;transform:translateY(-2px)}}.jump{position:absolute;bottom:12px;left:50%;transform:translate(-50%);display:inline-flex;align-items:center;gap:5px;padding:5px 12px;border-radius:20px;border:1px solid var(--border-2);backgrou"
+    s += "nd:var(--bg);color:var(--fg);font-size:12px;font-weight:500;cursor:pointer;box-shadow:var(--shadow);animation:rise .18s ease-out;white-space:nowrap}.jump:hover{border-color:var(--accent);color:var(--accent-fg)}.lightbox{position:fixed;top:0;right:0;bottom:0;left:0;z-index:10;background:#000000c7;display:flex;flex-direction:column;align-items:center;justify-content:center;paddin"
+    s += "g:24px;gap:10px;cursor:zoom-out;animation:fade .15s ease-out}.lightbox img{max-width:100%;max-height:calc(100% - 30px);border-radius:8px;box-shadow:0 10px 40px #00000080}.lb-name{color:#ddd;font-size:12px;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.lb-close{position:absolute;top:10px;right:10px;border:0;background:#ffffff1f;color:#fff;border-radius"
+    s += ":50%;width:30px;height:30px;display:flex;align-items:center;justify-content:center;cursor:pointer}.lb-close:hover{background:#ffffff38}@keyframes fade{0%{opacity:0}}@media(prefers-reduced-motion:reduce){*,*:before,*:after{animation-duration:.001ms!important;animation-iteration-count:1!important;transition:none!important}.spinner{animation:spin 1.5s linear infinite!important}.ca"
+    s += "ret{animation:none!important}}</style>\n"
+    s += "  </head>\n"
+    s += "  <body>\n"
+    s += "    <div id=\"app\"></div>\n"
+    s += "  </body>\n"
+    s += "</html>\n"
+    Return s
+End Function
+' </generated:transcript-html>
