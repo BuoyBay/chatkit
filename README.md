@@ -1,4 +1,4 @@
-# View-based agent chat panel — context, tools, activity
+# View-based agent chat panel
 
 A composable View-based native agent chat panel. The panel displays
 a conversation, selected provider, project-item context, tool activity, proposed

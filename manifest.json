@@ -2,5 +2,5 @@
   "schema": 1,
   "name": "chatkit",
   "version": "0.1.0",
-  "description": "View-based agent chat panel \u2014 context, tools, activity"
+  "description": "View-based agent chat panel"
 }
