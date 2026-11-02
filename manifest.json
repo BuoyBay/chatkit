@@ -2,5 +2,5 @@
   "schema": 1,
   "name": "chatkit",
   "version": "0.1.0",
-  "description": "Composable native agent chat panel with project context, tool activity and explicit proposal actions"
+  "description": "Embed a View-based native agent chat panel with project context and tool activity"
 }
