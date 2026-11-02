@@ -1,6 +1,6 @@
-# Embed a native agent chat panel in a Buoy application
+# Embed a View-based native agent chat panel with project context and tool activity
 
-A composable native `View` for agent chat in Buoy applications. The panel displays
+A composable View-based native agent chat panel. The panel displays
 a conversation, selected provider, project-item context, tool activity, proposed
 changes, and provider permission requests. It delegates all model access, project
 changes, credentials and process ownership to an application-supplied host.
@@ -49,7 +49,6 @@ On your own machine, install Buoy and run:
 buoy ai init --both
 ```
 
-The generated agent files and editor settings stay local and are ignored by Git.
 
 ## Contributing
 

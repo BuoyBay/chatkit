@@ -53,9 +53,3 @@ Markdown renderer or a terminal emulator.
 hold weak references to the panel. `PerformSend`, `PerformCancel`,
 `PerformApprove`, `PerformReject`, and `PerformSignIn` drive the same native
 button actions as a user for integration tests.
-
-## Verification
-
-
-Maintainers run the private validation suite before release. See the repository README for public build instructions.
-

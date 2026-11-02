@@ -279,8 +279,6 @@ Returns: no value.
 
 Returns: no value.
 
-## ChatKit functions
-
 ### ChatMimeType
 
 `Public Function ChatMimeType(fileExt As String) As String`

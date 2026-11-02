@@ -15,7 +15,7 @@ Copy `chatkit-0.1.0.buipkg` into the consumer's `packages/` and `Import chatkit`
 
 This complete desktop example echoes a message through the real host callback and supplies one context-item reference. It does not call a provider, execute a tool, or edit a project. Build it as a desktop application and run it in a graphical session.
 
-```buoy
+```basic
 Import chatkit
 
 Class LocalChatWindow Inherits Window Implements ChatPanelHost

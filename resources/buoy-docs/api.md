@@ -78,5 +78,4 @@ All UI updates and host callbacks run on the UI thread. Hosts should marshal wor
 
 See [Getting started](getting-started.md) for a complete host and [ChatKit](index.md) for ownership boundaries.
 
-
 [Full typed API: properties, parameters, defaults, and returns](typed-api.md)
