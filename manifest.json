@@ -2,5 +2,5 @@
   "schema": 1,
   "name": "chatkit",
   "version": "0.1.0",
-  "description": "Embed a View-based native agent chat panel with project context and tool activity"
+  "description": "View-based agent chat panel \u2014 context, tools, activity"
 }
